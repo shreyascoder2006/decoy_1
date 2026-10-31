@@ -279,6 +279,17 @@
     }
     const holder = row.querySelector(SELECTORS.bubble);
     const target = (holder && holder.parentElement) || row;
+    if (result.level === 'low') {
+      // A clean result gets one quiet line, not a card, and never says "genuine".
+      const chip = el(
+        'div',
+        `Checked: no scam signals found (score ${result.score}/100). Not proof the message is genuine.`,
+        { fontSize: '11px', opacity: '0.7', fontStyle: 'italic', margin: '3px 0 0' }
+      );
+      chip.setAttribute(BANNER_ATTR, 'low');
+      target.appendChild(chip);
+      return chip;
+    }
     const banner = buildCard(result.level, {
       title: result.level === 'high' ? 'High scam risk' : 'Some scam signals',
       detail: result.summary,
@@ -304,7 +315,7 @@
     if (chatResults.has(key)) {
       const cached = chatResults.get(key);
       const { level } = cached.result;
-      if ((level === 'medium' || level === 'high') && !row.querySelector(`[${BANNER_ATTR}]`)) {
+      if (level !== 'unknown' && !row.querySelector(`[${BANNER_ATTR}]`)) {
         renderChatBanner(row, cached);
       }
       return;
@@ -323,7 +334,7 @@
     }
     chatResults.set(key, outcome);
     const { level } = outcome.result;
-    if (level === 'medium' || level === 'high') {
+    if (level !== 'unknown') {
       renderChatBanner(row, outcome);
     }
     if (level === 'high') {
