@@ -1,13 +1,19 @@
 /*
  * WhatsApp Web content script. Three jobs, all advisory:
  *
- *   1. Chat text   - scores each received message for scam signals and shows a
- *                    banner under it (medium and high only) plus a toast (high).
+ *   1. Chat text   - scores each received message for scam signals. A compact
+ *                    chip appears under the message (medium and high), and a
+ *                    full card opens for high risk or when the chip is clicked.
  *   2. Voice notes - when a voice note is played, fetches its audio from the
  *                    page, decodes it to 16 kHz mono and has the local detector
- *                    score it. The result shows as a toast.
+ *                    score it. The result shows as a card with a window strip.
  *   3. Live calls  - shows the call alert (score and reasons) sent by the
  *                    service worker while Start Protection is running.
+ *
+ * Every result uses one card layout: a risk label, a title and the score out of
+ * 100; a meter marked at the medium and high cut-offs; a list of signals with
+ * their points and a collapsed "why this matters"; and a collapsed footer on
+ * how the score works.
  *
  * WhatsApp Web's markup is undocumented and changes. The selectors below are
  * the likeliest breakage points. Everything the page supplies is inserted with
@@ -32,12 +38,14 @@
   const DEBOUNCE_MS = 400;
   const BANNER_ATTR = 'data-decoy-chat-banner';
   const TOAST_AUTOCLOSE_LOW_MS = 10000;
+  const DEFAULT_THRESHOLDS = { medium: 25, high: 55 };
 
-  const COLOURS = {
-    high: { bg: '#fde8e8', border: '#c0392b', text: '#7a1d14' },
-    medium: { bg: '#fff4d6', border: '#d68910', text: '#6b4400' },
-    low: { bg: '#eef6ee', border: '#7aa77a', text: '#2d4a2d' },
-    unknown: { bg: '#eeeeee', border: '#999999', text: '#444444' }
+  const LEVELS = {
+    high: { label: 'HIGH RISK', pill: '#c0392b', bg: '#fff5f4', border: '#e3b3ae', text: '#3b1a17' },
+    medium: { label: 'MEDIUM RISK', pill: '#b9770e', bg: '#fffaf0', border: '#ecd3a0', text: '#3d2e0a' },
+    low: { label: 'LOW RISK', pill: '#2e7d32', bg: '#f5faf5', border: '#bcd9bd', text: '#1d3a1f' },
+    unknown: { label: 'NOT CHECKED', pill: '#6b7280', bg: '#f4f5f6', border: '#d1d5db', text: '#2b2f36' },
+    info: { label: 'CHECKING', pill: '#3b6ea5', bg: '#f3f7fc', border: '#c5d6ea', text: '#1c2f45' }
   };
 
   // -------------------------------------------------------------------------
@@ -55,102 +63,173 @@
     return node;
   }
 
+  // A collapsed section: a small link-style summary that opens to some text.
+  function collapsible(summaryText, bodyText) {
+    const section = document.createElement('details');
+    section.style.marginTop = '3px';
+    section.appendChild(
+      el('summary', summaryText, { cursor: 'pointer', fontSize: '11px', color: '#2a5db0' })
+    );
+    section.appendChild(el('div', bodyText, { fontSize: '11px', opacity: '0.85', margin: '3px 0 0' }));
+    return section;
+  }
+
+  function pointsChip(points) {
+    return el('span', `+${points}`, {
+      flex: 'none',
+      fontSize: '11px',
+      fontWeight: '700',
+      padding: '1px 7px',
+      borderRadius: '9px',
+      background: 'rgba(0,0,0,0.08)'
+    });
+  }
+
   /*
-   * opts: { title, detail, score?, items?, footer?, onClose?, compact? }
+   * opts: { title, detail, score?, thresholds?, extra?, itemsHeading?, items?,
+   *         footer?, onClose? }
    * items: [{ text, points?, reason? }]
    */
   function buildCard(level, opts) {
-    const colour = COLOURS[level] || COLOURS.unknown;
+    const theme = LEVELS[level] || LEVELS.unknown;
     const card = el('div', undefined, {
-      background: colour.bg,
-      border: `1px solid ${colour.border}`,
-      borderLeft: `5px solid ${colour.border}`,
-      color: colour.text,
-      borderRadius: '6px',
-      padding: '8px 10px',
-      margin: '6px 0',
-      font: '12px/1.4 Arial, sans-serif',
+      background: theme.bg,
+      border: `1px solid ${theme.border}`,
+      borderLeft: `4px solid ${theme.pill}`,
+      color: theme.text,
+      borderRadius: '8px',
+      padding: '10px 12px',
+      margin: '0',
+      font: '12px/1.45 Arial, sans-serif',
       textAlign: 'left',
-      boxSizing: 'border-box'
+      boxSizing: 'border-box',
+      width: '100%',
+      boxShadow: '0 1px 4px rgba(0,0,0,0.25)'
     });
     card.setAttribute('role', 'status');
 
-    const header = el('div', undefined, {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'baseline',
-      gap: '10px'
-    });
-    header.appendChild(el('div', opts.title, { fontWeight: '700', fontSize: '13px' }));
-    const right = el('div', undefined, { display: 'flex', gap: '8px', alignItems: 'baseline' });
+    // Header: risk label, title, score, close.
+    const header = el('div', undefined, { display: 'flex', alignItems: 'center', gap: '8px' });
+    header.appendChild(
+      el('span', theme.label, {
+        flex: 'none',
+        background: theme.pill,
+        color: '#fff',
+        fontSize: '10px',
+        fontWeight: '700',
+        letterSpacing: '0.06em',
+        padding: '2px 8px',
+        borderRadius: '10px'
+      })
+    );
+    header.appendChild(el('div', opts.title, { flex: '1', minWidth: '0', fontWeight: '700', fontSize: '13px' }));
     if (typeof opts.score === 'number') {
-      right.appendChild(el('span', `Risk score ${opts.score}/100`, { fontWeight: '700', whiteSpace: 'nowrap' }));
+      const score = el('div', undefined, { flex: 'none', whiteSpace: 'nowrap' });
+      score.appendChild(el('span', String(opts.score), { fontSize: '20px', fontWeight: '800' }));
+      score.appendChild(el('span', '/100', { fontSize: '11px', opacity: '0.7' }));
+      header.appendChild(score);
     }
     if (opts.onClose) {
       const close = el('button', '×', {
+        flex: 'none',
         border: 'none',
         background: 'transparent',
-        color: colour.text,
+        color: theme.text,
         cursor: 'pointer',
-        fontSize: '16px',
+        fontSize: '18px',
         lineHeight: '1',
-        padding: '0'
+        padding: '0 2px'
       });
       close.setAttribute('aria-label', 'Dismiss');
       close.addEventListener('click', opts.onClose);
-      right.appendChild(close);
+      header.appendChild(close);
     }
-    header.appendChild(right);
     card.appendChild(header);
 
+    // Meter, with ticks at the medium and high cut-offs when they are known.
     if (typeof opts.score === 'number') {
-      const track = el('div', undefined, {
-        height: '5px',
+      const meter = el('div', undefined, {
+        position: 'relative',
+        height: '6px',
         background: 'rgba(0,0,0,0.12)',
         borderRadius: '3px',
-        margin: '4px 0 6px'
+        margin: '9px 0 2px'
       });
-      track.appendChild(
+      meter.appendChild(
         el('div', undefined, {
           height: '100%',
           width: `${Math.max(0, Math.min(100, opts.score))}%`,
-          background: colour.border,
+          background: theme.pill,
           borderRadius: '3px'
         })
       );
-      card.appendChild(track);
+      if (opts.thresholds) {
+        for (const at of [opts.thresholds.medium, opts.thresholds.high]) {
+          meter.appendChild(
+            el('div', undefined, {
+              position: 'absolute',
+              left: `${at}%`,
+              top: '-2px',
+              bottom: '-2px',
+              width: '2px',
+              background: 'rgba(0,0,0,0.45)'
+            })
+          );
+        }
+      }
+      card.appendChild(meter);
+      if (opts.thresholds) {
+        const scale = el('div', undefined, { position: 'relative', height: '13px', fontSize: '10px', opacity: '0.7' });
+        scale.appendChild(el('span', 'Low', { position: 'absolute', left: '0' }));
+        scale.appendChild(el('span', `Medium ${opts.thresholds.medium}`, { position: 'absolute', left: `${opts.thresholds.medium}%` }));
+        scale.appendChild(el('span', `High ${opts.thresholds.high}`, { position: 'absolute', left: `${opts.thresholds.high}%` }));
+        card.appendChild(scale);
+      }
     }
 
     if (opts.detail) {
-      card.appendChild(el('div', opts.detail));
+      card.appendChild(el('div', opts.detail, { margin: '8px 0 0' }));
+    }
+    if (opts.extra) {
+      card.appendChild(opts.extra);
     }
 
+    // Signals.
     if (opts.items && opts.items.length) {
-      const list = el('ul', undefined, { margin: '6px 0 0 16px', padding: '0' });
+      card.appendChild(
+        el('div', `${opts.itemsHeading || 'Signals found'} (${opts.items.length})`, {
+          fontSize: '10px',
+          fontWeight: '700',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          opacity: '0.7',
+          margin: '12px 0 2px'
+        })
+      );
       for (const item of opts.items) {
-        const li = el('li', undefined, { marginBottom: '5px' });
-        li.appendChild(el('span', item.text, { fontWeight: item.points === undefined ? '400' : '600' }));
+        const row = el('div', undefined, { padding: '6px 0', borderTop: '1px solid rgba(0,0,0,0.08)' });
+        const line = el('div', undefined, {
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: '8px'
+        });
+        line.appendChild(el('div', item.text, { fontWeight: item.points === undefined ? '400' : '600' }));
         if (item.points !== undefined) {
-          li.appendChild(el('span', ` (+${item.points})`, { fontWeight: '700' }));
+          line.appendChild(pointsChip(item.points));
         }
+        row.appendChild(line);
         if (item.reason) {
-          li.appendChild(el('div', `Why this matters: ${item.reason}`, { fontSize: '11px', opacity: '0.85' }));
+          row.appendChild(collapsible('Why this matters', item.reason));
         }
-        list.appendChild(li);
+        card.appendChild(row);
       }
-      card.appendChild(list);
     }
 
     if (opts.footer) {
-      card.appendChild(
-        el('div', opts.footer, {
-          fontSize: '10px',
-          opacity: '0.8',
-          marginTop: '4px',
-          borderTop: `1px solid ${colour.border}`,
-          paddingTop: '4px'
-        })
-      );
+      const foot = el('div', undefined, { marginTop: '4px', borderTop: `1px solid ${theme.border}`, paddingTop: '4px' });
+      foot.appendChild(collapsible('How this score works', opts.footer));
+      card.appendChild(foot);
     }
     return card;
   }
@@ -164,11 +243,14 @@
       position: 'fixed',
       top: '12px',
       right: '12px',
-      width: '360px',
-      maxHeight: '90vh',
+      width: '380px',
+      maxHeight: '92vh',
       overflowY: 'auto',
       zIndex: '2147483647',
-      pointerEvents: 'none'
+      pointerEvents: 'none',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px'
     });
     toastHost.id = 'decoy-toasts';
     document.body.appendChild(toastHost);
@@ -197,8 +279,8 @@
   }
 
   function scoreFooter(result) {
-    const { medium, high } = result.thresholds || { medium: 25, high: 55 };
-    let text = `Each signal adds the points in brackets; ${medium}+ is medium and ${high}+ is high.`;
+    const { medium, high } = result.thresholds || DEFAULT_THRESHOLDS;
+    let text = `Each signal adds the points shown; ${medium}+ is medium and ${high}+ is high.`;
     if (result.raw_points > result.score) {
       text += ` The signals total ${result.raw_points}, capped at 100.`;
     }
@@ -206,7 +288,7 @@
     if (model && model.status === 'unavailable') {
       text += ` The language model was unavailable (${model.detail || 'unknown reason'}), so this is rules only.`;
     } else if (model && model.id && model.p_phishing !== null && model.p_phishing !== undefined) {
-      text += ` Language model ${model.id} rated the message ${Math.round(100 * model.p_phishing)}% scam-like.`;
+      text += ` Language model ${model.id} rated the message ${Math.round(100 * model.p_phishing)}% scam-like (its own score, not a calibrated probability).`;
     }
     return `${text} A triage score, not a probability of fraud.`;
   }
@@ -271,7 +353,27 @@
     return { sender_name: senderOf(row), body, links };
   }
 
-  function renderChatBanner(row, outcome) {
+  // The full card for one checked message.
+  function chatCardOpts(result, sender) {
+    const who = sender ? ` from ${sender}` : '';
+    return {
+      title: `${result.level === 'high' ? 'Scam message' : 'Possible scam message'}${who}`,
+      detail: result.summary,
+      score: result.score,
+      thresholds: result.thresholds || DEFAULT_THRESHOLDS,
+      items: result.findings.map((f) => ({ text: f.message, points: f.points, reason: f.reason })),
+      footer: scoreFooter(result)
+    };
+  }
+
+  function openChatCard(key, result, sender) {
+    showToast(result.level, chatCardOpts(result, sender), { id: `chat-${key}` });
+  }
+
+  // Under the message: one quiet line when clean, or a compact one-line chip
+  // (risk label, score, top signal, Details) when flagged. A chip fits any bubble
+  // width; the full card opens on click.
+  function renderChatMarker(row, outcome, key, sender) {
     const result = outcome.result;
     const existing = row.querySelector(`[${BANNER_ATTR}]`);
     if (existing) {
@@ -279,27 +381,66 @@
     }
     const holder = row.querySelector(SELECTORS.bubble);
     const target = (holder && holder.parentElement) || row;
+
     if (result.level === 'low') {
       // A clean result gets one quiet line, not a card, and never says "genuine".
-      const chip = el(
+      const note = el(
         'div',
         `Checked: no scam signals found (score ${result.score}/100). Not proof the message is genuine.`,
         { fontSize: '11px', opacity: '0.7', fontStyle: 'italic', margin: '3px 0 0' }
       );
-      chip.setAttribute(BANNER_ATTR, 'low');
-      target.appendChild(chip);
-      return chip;
+      note.setAttribute(BANNER_ATTR, 'low');
+      target.appendChild(note);
+      return note;
     }
-    const banner = buildCard(result.level, {
-      title: result.level === 'high' ? 'High scam risk' : 'Some scam signals',
-      detail: result.summary,
-      score: result.score,
-      items: result.findings.map((f) => ({ text: f.message, points: f.points, reason: f.reason })),
-      footer: scoreFooter(result)
+
+    const theme = LEVELS[result.level] || LEVELS.unknown;
+    const top = result.findings.length ? result.findings[0].message : result.summary;
+    const chip = el('div', undefined, {
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: '6px',
+      boxSizing: 'border-box',
+      maxWidth: '100%',
+      margin: '4px 0 0',
+      padding: '4px 8px',
+      background: theme.bg,
+      border: `1px solid ${theme.border}`,
+      borderLeft: `4px solid ${theme.pill}`,
+      borderRadius: '6px',
+      color: theme.text,
+      font: '11px/1.3 Arial, sans-serif'
     });
-    banner.setAttribute(BANNER_ATTR, result.level);
-    target.appendChild(banner);
-    return banner;
+    chip.setAttribute(BANNER_ATTR, result.level);
+    chip.appendChild(
+      el('span', theme.label, {
+        background: theme.pill,
+        color: '#fff',
+        fontWeight: '700',
+        fontSize: '10px',
+        letterSpacing: '0.05em',
+        padding: '1px 7px',
+        borderRadius: '9px'
+      })
+    );
+    chip.appendChild(el('span', `${result.score}/100`, { fontWeight: '700' }));
+    chip.appendChild(
+      el('span', top, { flex: '1', minWidth: '0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '240px' })
+    );
+    const details = el('button', 'Details', {
+      border: `1px solid ${theme.pill}`,
+      background: 'transparent',
+      color: theme.pill,
+      borderRadius: '9px',
+      padding: '0 8px',
+      cursor: 'pointer',
+      fontSize: '11px'
+    });
+    details.addEventListener('click', () => openChatCard(key, result, sender));
+    chip.appendChild(details);
+    target.appendChild(chip);
+    return chip;
   }
 
   async function processChat(row) {
@@ -310,13 +451,12 @@
     const key = hash(
       [payload.sender_name, payload.body, payload.links.map((l) => `${l.text}>${l.href}`).join('\u0002')].join('\u0001')
     );
-    // WhatsApp re-renders rows as you scroll, which drops our banner; the cache
-    // lets it come back without another request or another toast.
+    // WhatsApp re-renders rows as you scroll, which drops our marker; the cache
+    // lets it come back without another request or another card.
     if (chatResults.has(key)) {
       const cached = chatResults.get(key);
-      const { level } = cached.result;
-      if (level !== 'unknown' && !row.querySelector(`[${BANNER_ATTR}]`)) {
-        renderChatBanner(row, cached);
+      if (cached.result.level !== 'unknown' && !row.querySelector(`[${BANNER_ATTR}]`)) {
+        renderChatMarker(row, cached, key, payload.sender_name);
       }
       return;
     }
@@ -327,29 +467,18 @@
     const outcome = await relay({ type: 'CHAT_ANALYZE', key, payload });
     chatInFlight.delete(key);
     if (!outcome || !outcome.ok) {
-      // Quiet on purpose: a banner on every message would drown the chat if the
-      // backend is simply not running. The popup and console carry the reason.
+      // Quiet on purpose: a marker on every message would drown the chat if the
+      // backend is simply not running. The console carries the reason.
       console.info('[decoy] chat check unavailable:', outcome && outcome.error);
       return;
     }
     chatResults.set(key, outcome);
     const { level } = outcome.result;
     if (level !== 'unknown') {
-      renderChatBanner(row, outcome);
+      renderChatMarker(row, outcome, key, payload.sender_name);
     }
     if (level === 'high') {
-      const who = payload.sender_name ? ` from ${payload.sender_name}` : '';
-      showToast(
-        'high',
-        {
-          title: `High scam risk${who}`,
-          detail: outcome.result.summary,
-          score: outcome.result.score,
-          items: outcome.result.findings.map((f) => ({ text: f.message, points: f.points, reason: f.reason })),
-          footer: scoreFooter(outcome.result)
-        },
-        { id: `chat-${key}` }
-      );
+      openChatCard(key, outcome.result, payload.sender_name);
     }
   }
 
@@ -383,14 +512,62 @@
     return btoa(binary);
   }
 
-  async function processVoice(audio) {
-    const src = audio.currentSrc || audio.src || '';
-    if (!src.startsWith('blob:') || voiceSeen.has(src)) {
+  // One block per analysed window: red synthetic, green human-like, grey too quiet.
+  function windowStrip(result) {
+    const wrap = el('div', undefined, { margin: '10px 0 0' });
+    wrap.appendChild(
+      el('div', 'Windows analysed', {
+        fontSize: '10px',
+        fontWeight: '700',
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+        opacity: '0.7',
+        margin: '0 0 4px'
+      })
+    );
+    const strip = el('div', undefined, { display: 'flex', gap: '3px' });
+    for (const w of result.windows || []) {
+      let colour = '#9ca3af';
+      let label = 'too quiet to judge';
+      if (w.p_fake !== null && w.p_fake !== undefined) {
+        const synthetic = w.p_fake >= result.threshold;
+        colour = synthetic ? '#c0392b' : '#2e7d32';
+        label = `${Math.round(100 * w.p_fake)}% synthetic (${synthetic ? 'flagged' : 'human-like'})`;
+      }
+      const block = el('div', undefined, { flex: '1', height: '16px', borderRadius: '3px', background: colour });
+      block.title = `${w.start_s}s to ${w.end_s}s: ${label}`;
+      strip.appendChild(block);
+    }
+    wrap.appendChild(strip);
+    wrap.appendChild(
+      el('div', 'Each block is one window of about 4 seconds: red synthetic, green human-like, grey too quiet. Hover for details.', {
+        fontSize: '10px',
+        opacity: '0.7',
+        margin: '4px 0 0'
+      })
+    );
+    return wrap;
+  }
+
+  function processVoice(audio) {
+    return checkVoiceSrc(audio.currentSrc || audio.src || '');
+  }
+
+  async function checkVoiceSrc(src) {
+    if (!src.startsWith('blob:')) {
+      if (src && !voiceSeen.has(src)) {
+        voiceSeen.add(src);
+        console.info('[decoy] voice: ignoring audio with a non-blob source:', src.slice(0, 40));
+      }
+      return;
+    }
+    if (voiceSeen.has(src)) {
       return;
     }
     voiceSeen.add(src);
+    console.info('[decoy] voice: checking a voice note', src.slice(0, 40));
     const id = `voice-${hash(src)}`;
-    showToast('unknown', { title: 'Checking voice note…', detail: 'Decoding the audio and running the detector.' }, { id });
+    showToast('info', { title: 'Voice note', detail: 'Decoding the audio and running the detector…' }, { id });
 
     let pcmBase64;
     try {
@@ -405,9 +582,10 @@
       const pcm = toPcm16(decoded);
       pcmBase64 = bytesToBase64(new Uint8Array(pcm.buffer));
     } catch (error) {
+      console.warn('[decoy] voice: could not read or decode the audio:', error && error.name, error && error.message);
       showToast(
         'unknown',
-        { title: 'Voice note not checked', detail: 'Chrome could not read or decode this voice note’s audio.' },
+        { title: 'Voice note', detail: 'Not checked: Chrome could not read or decode this voice note’s audio.' },
         { id, autoCloseMs: TOAST_AUTOCLOSE_LOW_MS }
       );
       return;
@@ -417,29 +595,25 @@
     if (!outcome || !outcome.ok) {
       showToast(
         'unknown',
-        { title: 'Voice note not checked', detail: `${(outcome && outcome.error) || 'no response'}.` },
+        { title: 'Voice note', detail: `Not checked: ${(outcome && outcome.error) || 'no response'}.` },
         { id, autoCloseMs: TOAST_AUTOCLOSE_LOW_MS }
       );
       return;
     }
     const result = outcome.result;
-    const titles = {
-      high: 'Possible AI-generated voice note',
-      medium: 'Some synthetic-speech signal in voice note',
-      low: 'No synthetic-speech signal in voice note',
-      unknown: 'Voice note not checked'
-    };
+    const checked = result.level !== 'unknown';
     showToast(
       result.level,
       {
-        title: titles[result.level] || titles.unknown,
-        detail: result.level === 'low' ? result.disclaimer : result.summary,
-        score: result.level === 'unknown' ? undefined : result.score,
+        title: 'Voice note analysis',
+        detail: result.summary,
+        score: checked ? result.score : undefined,
+        extra: checked ? windowStrip(result) : undefined,
+        itemsHeading: 'Evidence',
         items: result.reasons.map((text) => ({ text })),
-        footer:
-          result.level === 'unknown'
-            ? undefined
-            : `Score is the share of analysed windows classified as synthetic. Model: ${result.model_id}, threshold ${result.threshold}. A triage score, not a probability of fraud.`
+        footer: checked
+          ? `Score is the share of analysed windows classified as synthetic. Model: ${result.model_id}, threshold ${result.threshold}. ${result.disclaimer}`
+          : undefined
       },
       { id, autoCloseMs: result.level === 'low' ? TOAST_AUTOCLOSE_LOW_MS : undefined }
     );
@@ -461,10 +635,11 @@
           title: alert.title || 'Potential AI-generated voice detected',
           detail: alert.message,
           score: typeof alert.riskScore === 'number' ? alert.riskScore : undefined,
+          itemsHeading: 'Evidence',
           items: (alert.reasons || []).map((text) => ({ text })),
           footer: alert.provisional
-            ? 'Provisional: more audio is still being analysed. Advisory only; confirm the caller another way.'
-            : 'Advisory only; confirm the caller another way.'
+            ? 'Provisional: more audio is still being analysed. The score is the detector’s own average confidence over the flagged windows. Advisory only; confirm the caller another way.'
+            : 'The score is the detector’s own average confidence over the flagged windows. Advisory only; confirm the caller another way.'
         },
         { id: 'call-alert' }
       );
@@ -515,6 +690,7 @@
   }
 
   let lastRowCount = -1;
+  let lastAudioCount = -1;
   function scan() {
     const rows = receivedMessageRows();
     if (rows.length !== lastRowCount) {
@@ -524,7 +700,12 @@
     for (const row of rows) {
       void processChat(row);
     }
-    for (const audio of document.querySelectorAll(SELECTORS.audio)) {
+    const audios = document.querySelectorAll(SELECTORS.audio);
+    if (audios.length !== lastAudioCount) {
+      lastAudioCount = audios.length;
+      console.info('[decoy] audio elements on the page:', audios.length);
+    }
+    for (const audio of audios) {
       void processVoice(audio);
     }
   }
@@ -538,5 +719,21 @@
   // An audio element is created or re-sourced when a note is played; its
   // `play` event does not bubble, so catch it in the capture phase too.
   document.addEventListener('play', scan, true);
+  // Audio played through an element that is never attached to the page is
+  // reported by whatsapp-audio-hook.js (which runs in the page's own context).
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (
+      event.source === window &&
+      data &&
+      data.source === 'decoy-audio-hook' &&
+      typeof data.src === 'string' &&
+      data.src.startsWith(`blob:${window.location.origin}/`)
+    ) {
+      console.info('[decoy] voice: play reported by the page hook');
+      void checkVoiceSrc(data.src);
+    }
+  });
+
   scan();
 })();
