@@ -197,8 +197,35 @@ async function isTestingModeEnabled() {
   }
 }
 
+async function findActiveTab() {
+  // When the popup has focus, the service worker's notion of "current window"
+  // is not always the window the user is looking at, so fall back to the last
+  // focused window before giving up.
+  let [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!active) {
+    [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  }
+  if (!active) {
+    [active] = await chrome.tabs.query({ active: true });
+  }
+  return active || null;
+}
+
+function describeTab(tab) {
+  // Hostname only. Enough for the user to see which tab was picked up,
+  // without putting full URLs into messages or logs.
+  if (!tab || !tab.url) {
+    return 'a tab whose address this extension cannot read';
+  }
+  try {
+    return new URL(tab.url).hostname || tab.url;
+  } catch (error) {
+    return 'an unreadable address';
+  }
+}
+
 async function findTargetTab() {
-  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const active = await findActiveTab();
   if (!active) {
     return { error: 'No active tab was found in this window.' };
   }
@@ -217,9 +244,9 @@ async function findTargetTab() {
 
   return {
     error:
-      'Open https://web.whatsapp.com in the active tab and answer the call there, ' +
-      'then press Start Protection. To capture a different tab for testing, ' +
-      'enable "Capture any tab" in the popup.'
+      `The active tab is ${describeTab(active)}, not web.whatsapp.com. ` +
+      'Click the WhatsApp Web tab first, then press Start Protection — or ' +
+      'tick "Capture any tab (testing)" below to capture whatever tab is in front.'
   };
 }
 
