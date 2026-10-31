@@ -1,10 +1,10 @@
 /*
  * Gmail content script: reads each opened message, asks the local backend for
- * a phishing-signal score (via the service worker) and shows a banner above
- * the message body.
+ * a phishing-signal score (via the service worker) and shows a result card above
+ * the message body. The card layout is shared with WhatsApp (card-ui.js).
  *
  * Gmail's markup is undocumented and changes. The selectors below are the ones
- * Gmail has used for years, but if the banner stops appearing, these are what
+ * Gmail has used for years, but if the card stops appearing, these are what
  * to check. Everything the page supplies is inserted with textContent, never
  * innerHTML.
  */
@@ -12,6 +12,9 @@
   'use strict';
 
   console.info('[decoy] Gmail email check loaded');
+
+  // Shared card UI: card-ui.js is loaded before this script.
+  const { DEFAULT_THRESHOLDS, buildCard } = globalThis.DecoyCard;
 
   const SELECTORS = {
     message: 'div.adn',
@@ -25,15 +28,9 @@
   const DEBOUNCE_MS = 500;
   const BANNER_ATTR = 'data-decoy-email-banner';
 
-  const COLOURS = {
-    high: { bg: '#fde8e8', border: '#c0392b', text: '#7a1d14' },
-    medium: { bg: '#fff4d6', border: '#d68910', text: '#6b4400' },
-    low: { bg: '#eef6ee', border: '#7aa77a', text: '#2d4a2d' },
-    unknown: { bg: '#eeeeee', border: '#999999', text: '#444444' }
-  };
   const TITLES = {
-    high: 'High phishing risk',
-    medium: 'Some phishing signals',
+    high: 'Likely phishing email',
+    medium: 'Possible phishing email',
     low: 'No phishing signals found',
     unknown: 'Email check unavailable'
   };
@@ -73,7 +70,7 @@
     }
 
     const attachments = Array.from(messageEl.querySelectorAll(SELECTORS.attachment))
-      .map((el) => (el.textContent || '').trim().slice(0, 200))
+      .map((node) => (node.textContent || '').trim().slice(0, 200))
       .filter(Boolean)
       .slice(0, 50);
 
@@ -87,22 +84,8 @@
     };
   }
 
-  function el(tag, text, style) {
-    const node = document.createElement(tag);
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-    if (style) {
-      Object.assign(node.style, style);
-    }
-    return node;
-  }
-
-  /*
-   * opts: { detail, score?, findings?, footer? }. score is 0-100; findings
-   * carry { message, points, reason }. Everything is set with textContent.
-   */
-  function renderBanner(messageEl, level, opts) {
+  /* opts is passed to buildCard: { title, detail, score?, thresholds?, items?, footer? } */
+  function renderCard(messageEl, level, opts) {
     const bodyEl = messageEl.querySelector(SELECTORS.body);
     if (!bodyEl || !bodyEl.parentElement) {
       return;
@@ -111,98 +94,17 @@
     if (existing) {
       existing.remove();
     }
-    const findings = opts.findings || [];
-    const hasScore = typeof opts.score === 'number';
-
-    const colour = COLOURS[level] || COLOURS.unknown;
-    const banner = el('div', undefined, {
-      background: colour.bg,
-      border: `1px solid ${colour.border}`,
-      borderLeft: `5px solid ${colour.border}`,
-      color: colour.text,
-      borderRadius: '6px',
-      padding: '8px 12px',
-      margin: '8px 0',
-      font: '13px/1.4 Arial, sans-serif'
-    });
-    banner.setAttribute(BANNER_ATTR, level);
-    banner.setAttribute('role', 'status');
-
-    const header = el('div', undefined, {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'baseline',
-      gap: '12px'
-    });
-    // "No signals found" above a list of signals would contradict itself.
-    header.appendChild(
-      el(
-        'div',
-        level === 'low' && findings.length ? 'Minor phishing signals' : TITLES[level] || TITLES.unknown,
-        { fontWeight: '700' }
-      )
-    );
-    if (hasScore) {
-      header.appendChild(el('div', `Risk score ${opts.score}/100`, { fontWeight: '700', whiteSpace: 'nowrap' }));
-    }
-    banner.appendChild(header);
-
-    if (hasScore) {
-      const track = el('div', undefined, {
-        height: '6px',
-        background: 'rgba(0,0,0,0.12)',
-        borderRadius: '3px',
-        margin: '4px 0 6px'
-      });
-      track.appendChild(
-        el('div', undefined, {
-          height: '100%',
-          width: `${Math.max(0, Math.min(100, opts.score))}%`,
-          background: colour.border,
-          borderRadius: '3px'
-        })
-      );
-      banner.appendChild(track);
-    }
-
-    banner.appendChild(el('div', opts.detail));
-
-    if (findings.length) {
-      const list = el('ul', undefined, { margin: '6px 0 0 18px', padding: '0' });
-      for (const finding of findings) {
-        const item = el('li', undefined, { marginBottom: '6px' });
-        item.appendChild(el('span', finding.message, { fontWeight: '600' }));
-        item.appendChild(el('span', ` (+${finding.points})`, { fontWeight: '700' }));
-        if (finding.reason) {
-          item.appendChild(
-            el('div', `Why this matters: ${finding.reason}`, { fontSize: '12px', opacity: '0.85' })
-          );
-        }
-        list.appendChild(item);
-      }
-      banner.appendChild(list);
-    }
-
-    if (opts.footer) {
-      banner.appendChild(
-        el('div', opts.footer, {
-          fontSize: '11px',
-          opacity: '0.8',
-          marginTop: '4px',
-          borderTop: `1px solid ${colour.border}`,
-          paddingTop: '4px'
-        })
-      );
-    }
-
-    bodyEl.parentElement.insertBefore(banner, bodyEl);
+    const card = buildCard(level, opts);
+    card.style.margin = '8px 0';
+    card.style.boxShadow = 'none';
+    card.style.maxWidth = '760px';
+    card.setAttribute(BANNER_ATTR, level);
+    bodyEl.parentElement.insertBefore(card, bodyEl);
   }
 
   function scoreFooter(result) {
-    const { medium, high } = result.thresholds || { medium: 25, high: 55 };
-    let text =
-      `How this is scored: each signal adds the points in brackets; ` +
-      `${medium}+ is medium and ${high}+ is high.`;
+    const { medium, high } = result.thresholds || DEFAULT_THRESHOLDS;
+    let text = `Each signal adds the points shown; ${medium}+ is medium and ${high}+ is high.`;
     if (result.raw_points > result.score) {
       text += ` The signals total ${result.raw_points}, capped at 100.`;
     }
@@ -210,26 +112,31 @@
     if (model && model.status === 'unavailable') {
       text += ` The language model was unavailable (${model.detail || 'unknown reason'}), so this is rules only.`;
     } else if (model && model.id && model.p_phishing !== null && model.p_phishing !== undefined) {
-      text += ` Language model ${model.id} rated the wording ${Math.round(100 * model.p_phishing)}% phishing-like.`;
+      text += ` Language model ${model.id} rated the wording ${Math.round(100 * model.p_phishing)}% phishing-like (its own score, not a calibrated probability).`;
     }
-    return `${text} It is a triage score, not a probability of fraud.`;
+    return `${text} A triage score, not a probability of fraud.`;
   }
 
   function showResult(messageEl, outcome) {
     if (!outcome || !outcome.ok) {
-      renderBanner(messageEl, 'unknown', {
+      renderCard(messageEl, 'unknown', {
+        title: TITLES.unknown,
         detail: `Could not check this email: ${(outcome && outcome.error) || 'no response from the extension'}. Start the backend and reopen the message.`
       });
       return;
     }
     const result = outcome.result;
     const { level, findings, summary, disclaimer } = result;
-    renderBanner(messageEl, level, {
-      // For a low result the title already says it, so show the caveat instead.
+    const checked = level !== 'unknown';
+    renderCard(messageEl, level, {
+      // "No signals found" above a list of signals would contradict itself.
+      title: level === 'low' && findings.length ? 'Minor phishing signals' : TITLES[level] || TITLES.unknown,
+      // For a clean result the title already says it, so show the caveat instead.
       detail: level === 'low' ? disclaimer : summary,
-      score: level === 'unknown' ? undefined : result.score,
-      findings,
-      footer: findings.length ? scoreFooter(result) : undefined
+      score: checked ? result.score : undefined,
+      thresholds: checked ? result.thresholds || DEFAULT_THRESHOLDS : undefined,
+      items: findings.map((f) => ({ text: f.message, points: f.points, reason: f.reason })),
+      footer: checked ? scoreFooter(result) : undefined
     });
   }
 

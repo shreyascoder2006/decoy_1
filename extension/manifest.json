@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Live Call Voice Check (WhatsApp Web)",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Advisory warning when a WhatsApp Web call carries synthetic-speech signals. Capture is user-initiated and visibly active.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -21,7 +21,7 @@
   "content_scripts": [
     {
       "matches": ["https://mail.google.com/*"],
-      "js": ["gmail-content.js"],
+      "js": ["card-ui.js", "gmail-content.js"],
       "run_at": "document_idle"
     },
     {
@@ -32,7 +32,7 @@
     },
     {
       "matches": ["https://web.whatsapp.com/*"],
-      "js": ["whatsapp-content.js"],
+      "js": ["card-ui.js", "whatsapp-content.js"],
       "run_at": "document_idle"
     }
   ],
