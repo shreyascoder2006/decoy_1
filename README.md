@@ -123,6 +123,7 @@ scripts/benchmark_detectors.py  compare detector models on your own samples
 docs/LIVE_CALL_MANUAL_TEST.md   the real two-account test procedure
 docs/DETECTOR_BENCHMARK.md      how the default model was chosen, and its limits
 docs/WINDOWS_QUICKSTART.md      Windows setup, VB-CABLE, loading the extension
+docs/HANDOFF.md                 context transfer for a new session: state, blockers, findings
 ```
 
 ---
