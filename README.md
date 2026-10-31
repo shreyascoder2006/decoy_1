@@ -121,11 +121,16 @@ scripts/validate_extension.py   static manifest / reference / secret checks
 scripts/benchmark_detectors.py  compare detector models on your own samples
 docs/LIVE_CALL_MANUAL_TEST.md   the real two-account test procedure
 docs/DETECTOR_BENCHMARK.md      how the default model was chosen, and its limits
+docs/WINDOWS_QUICKSTART.md      Windows setup, VB-CABLE, loading the extension
 ```
 
 ---
 
 ## Install and run
+
+**On Windows, follow [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md)
+instead** — it has the PowerShell equivalents, the VB-CABLE setup and the
+Chrome loading steps in one place.
 
 ### 1. Backend
 
