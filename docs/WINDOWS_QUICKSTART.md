@@ -73,6 +73,17 @@ The defaults need no API key. Leave `.env` as it is unless told otherwise.
 
 ## 3. Start the backend
 
+First confirm the dependencies actually landed (a cancelled pip install is
+easy to miss):
+
+```powershell
+.\.venv\Scripts\python.exe -c "import torch, transformers, fastapi, uvicorn; print('deps OK', torch.__version__, transformers.__version__)"
+```
+
+If that errors, re-run the install commands from step 2 and let them finish.
+
+### Start the server — this window stays open
+
 ```powershell
 cd backend
 ```
@@ -81,9 +92,20 @@ cd backend
 $env:PYTHONPATH="."; ..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Leave this window open for the whole session — its log is your evidence trail.
+**This command does not return.** It keeps running and prints logs. That is
+correct — the backend is a server. Wait for:
 
-In a **second** PowerShell window, check it:
+```text
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+```
+
+Leave this window alone for the whole session. Its log is your evidence trail.
+Closing it, or pressing Ctrl+C, stops the backend and everything else will
+fail with "could not connect".
+
+### Check it from a SECOND window
+
+Open a **new** PowerShell window (the first one is busy running the server):
 
 ```powershell
 curl.exe http://127.0.0.1:8000/health
@@ -92,8 +114,16 @@ curl.exe http://127.0.0.1:8000/health
 You want `"provider":"local"` and `"mock_mode":false`. If `mock_mode` is
 `true`, you are about to demo scripted results — fix `.env` first.
 
-The detection model (~378 MB) downloads on the **first** analysis session and
-is cached afterwards. Trigger that download now, not during your demo:
+> `curl: (7) Failed to connect to 127.0.0.1:8000` means the server is not
+> running. Go back to the first window and check it is still showing the
+> uvicorn log.
+
+### Pre-download the model
+
+The detection model is **~1.3 GB** and downloads on the **first analysis
+session**, not at startup — so the server will appear healthy and then stall
+for minutes the first time you actually analyse something. Trigger it now,
+not during your demo:
 
 ```powershell
 cd backend
@@ -103,8 +133,13 @@ cd backend
 $env:PYTHONPATH="."; ..\.venv\Scripts\python.exe scripts\detect_file.py path\to\your-ai-sample.wav --expect fake
 ```
 
-Convert a sample to the wire format first if needed — install
-[ffmpeg](https://www.gyan.dev/ffmpeg/builds/) and run:
+Convert a sample to the wire format first if needed. Install ffmpeg with:
+
+```powershell
+winget install Gyan.FFmpeg
+```
+
+Then **close and reopen PowerShell** so the PATH change takes effect, and run:
 
 ```powershell
 ffmpeg -i input.mp3 -ar 16000 -ac 1 -c:a pcm_s16le output.wav
@@ -189,7 +224,9 @@ Full procedure: [LIVE_CALL_MANUAL_TEST.md](LIVE_CALL_MANUAL_TEST.md).
 
 | Symptom | Fix |
 |---|---|
-| "Could not reach the local backend" | the uvicorn window closed; restart it (step 3) |
+| `curl: (7) Failed to connect` / "Could not reach the local backend" | the server is not running. The uvicorn command in step 3 must stay open in its own window; run `curl` from a second window |
+| `cd : Cannot find path ...\backend\backend` | you are already in `backend`. Run `cd ..` first, or just skip the `cd` |
+| `ffmpeg : The term 'ffmpeg' is not recognized` | ffmpeg is not installed. `winget install Gyan.FFmpeg`, then **open a new PowerShell window** so PATH refreshes. It is only needed to convert samples for offline testing — the extension does not need it |
 | "Open https://web.whatsapp.com in the active tab" | WhatsApp Web is not the frontmost tab, or use testing mode |
 | "Could not get tab audio permission" | reload the extension, then press Start from a freshly opened popup. If it persists, add `"activeTab"` to the `permissions` array in `extension\manifest.json` and reload |
 | Call goes silent on Start | the playback branch failed — check the offscreen console via **Inspect views** |
