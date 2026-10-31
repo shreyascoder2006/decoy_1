@@ -15,6 +15,8 @@ const ui = {
   statusValue: el('status-value'),
   statusDetail: el('status-detail'),
   mockBanner: el('mock-banner'),
+  testingBanner: el('testing-banner'),
+  testingMode: el('testing-mode'),
   alertBox: el('alert-box'),
   alertTitle: el('alert-title'),
   alertMessage: el('alert-message'),
@@ -91,6 +93,9 @@ function render(state) {
   ui.stop.disabled = !running;
 
   ui.mockBanner.hidden = !state.mockMode;
+  ui.testingBanner.hidden = !state.testingMode;
+  // The toggle is a setting, so it stays editable until capture starts.
+  ui.testingMode.disabled = running;
 
   // --- alert ------------------------------------------------------------
   if (state.alertCode) {
@@ -178,6 +183,7 @@ async function refresh() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
     if (response && response.ok) {
+      ui.testingMode.checked = Boolean(response.testingModeEnabled);
       render(response.state);
     }
   } catch (error) {
@@ -212,6 +218,17 @@ ui.stop.addEventListener('click', async () => {
     /* the service worker may have already torn down */
   }
   await refresh();
+});
+
+ui.testingMode.addEventListener('change', async () => {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SET_TESTING_MODE',
+      enabled: ui.testingMode.checked
+    });
+  } catch (error) {
+    ui.statusDetail.textContent = 'Could not save the testing-mode setting.';
+  }
 });
 
 chrome.runtime.onMessage.addListener((message) => {

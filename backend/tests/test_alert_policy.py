@@ -74,25 +74,33 @@ def test_alert_wording_is_hedged_not_definitive():
     assert "verify" in body
 
 
-def test_second_fake_chunk_upgrades_once_then_goes_quiet():
+def test_the_alert_upgrades_once_then_goes_quiet():
+    """With min_fake_windows=1: warn on window 1, upgrade at a run of 3.
+
+    The gap between warning and upgrade is deliberate -- the upgrade claims
+    stronger evidence, so it should need more than one extra window.
+    """
     p = policy()
-    first = p.evaluate(chunk("fake", begin=0.0, end=4.0))
-    second = p.evaluate(chunk("fake", begin=4.0, end=8.0))
-    third = p.evaluate(chunk("fake", begin=8.0, end=12.0))
-    fourth = p.evaluate(chunk("fake", begin=12.0, end=16.0))
+    results = [
+        p.evaluate(chunk("fake", begin=i * 4.0, end=(i + 1) * 4.0)) for i in range(5)
+    ]
 
-    assert first.alert.code == CODE_POTENTIAL
-    assert first.alert.provisional is True
+    assert results[0].alert.code == CODE_POTENTIAL
+    assert results[0].alert.provisional is True
 
-    assert second.alert is not None
-    assert second.alert.code == CODE_STRONGER
-    assert second.alert.provisional is False
+    # Window 2 adds evidence but does not yet justify the stronger claim.
+    assert results[1].alert is None
+
+    assert results[2].alert is not None
+    assert results[2].alert.code == CODE_STRONGER
+    assert results[2].alert.provisional is False
 
     # No repeated notification for every subsequent window.
-    assert third.alert is None
-    assert fourth.alert is None
+    assert results[3].alert is None
+    assert results[4].alert is None
     # State still advances silently.
-    assert p.fake_window_count == 4
+    assert p.fake_window_count == 5
+    assert p.consecutive_fake_windows == 5
 
 
 def test_real_label_is_not_worded_as_verification():
@@ -205,3 +213,60 @@ def test_mixed_sequence_alerts_once_on_first_fake():
     alerts = [e for m in sequence for e in p.evaluate(m).events if isinstance(e, AlertEvent)]
     assert len(alerts) == 1
     assert alerts[0].code == CODE_POTENTIAL
+
+
+# --- run-length requirement ----------------------------------------------
+
+
+def test_default_policy_alerts_on_the_first_fake_window():
+    """min_fake_windows=1 preserves the original behaviour."""
+    p = AlertPolicy("s", "resemble", min_fake_windows=1)
+    assert p.evaluate(chunk("fake")).alert is not None
+
+
+def test_two_window_policy_waits_for_a_run():
+    p = AlertPolicy("s", "local-model", min_fake_windows=2)
+    first = p.evaluate(chunk("fake", begin=0.0, end=4.0))
+    assert first.alert is None
+    assert p.consecutive_fake_windows == 1
+    statuses = [e for e in first.events if isinstance(e, StatusEvent)]
+    assert statuses and statuses[0].reason == "building_evidence"
+
+    second = p.evaluate(chunk("fake", begin=4.0, end=8.0))
+    assert second.alert is not None
+    assert second.alert.code == CODE_POTENTIAL
+
+
+def test_a_clean_window_breaks_the_run():
+    p = AlertPolicy("s", "local-model", min_fake_windows=2)
+    p.evaluate(chunk("fake"))
+    p.evaluate(chunk("real"))
+    assert p.consecutive_fake_windows == 0
+    # A later isolated fake must not combine with the earlier one.
+    assert p.evaluate(chunk("fake")).alert is None
+    assert p.alert_raised is False
+
+
+def test_skipped_windows_do_not_break_the_run():
+    """A pause in speech is not evidence that the voice became genuine."""
+    p = AlertPolicy("s", "local-model", min_fake_windows=2)
+    p.evaluate(chunk("fake"))
+    p.evaluate(chunk(None, chunk_label="skipped"))
+    assert p.consecutive_fake_windows == 1
+    assert p.evaluate(chunk("fake")).alert is not None
+
+
+def test_upgrade_requires_a_longer_run():
+    p = AlertPolicy("s", "local-model", min_fake_windows=2)
+    assert p.evaluate(chunk("fake")).alert is None
+    assert p.evaluate(chunk("fake")).alert.code == CODE_POTENTIAL
+    assert p.evaluate(chunk("fake")).alert is None
+    upgrade = p.evaluate(chunk("fake"))
+    assert upgrade.alert is not None
+    assert upgrade.alert.code == CODE_STRONGER
+    assert upgrade.alert.provisional is False
+
+
+def test_min_fake_windows_is_floored_at_one():
+    for bad in (0, -5):
+        assert AlertPolicy("s", "p", min_fake_windows=bad).min_fake_windows == 1

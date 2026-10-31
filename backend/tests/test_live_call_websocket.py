@@ -14,8 +14,10 @@ from typing import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.live_call.resemble_client import DetectorClient, DetectorUnavailable
 from app.live_call.schemas import ProviderMessage
+from app.live_call.session_manager import SessionRegistry
 from app.main import create_app
 
 SILENT_FRAME = b"\x00\x00" * 1600  # 100 ms of 16 kHz mono s16le
@@ -77,10 +79,24 @@ class FakeDetectorClient(DetectorClient):
 
 
 @contextlib.contextmanager
-def harness(client_obj: DetectorClient) -> Iterator[tuple[TestClient, FakeDetectorClient]]:
+def harness(
+    client_obj: DetectorClient, min_fake_windows: int = 1
+) -> Iterator[tuple[TestClient, FakeDetectorClient]]:
+    """Run the app with a scripted detector.
+
+    ``min_fake_windows`` is explicit in every test rather than inherited from
+    the production default, so a change to that default cannot silently turn
+    these tests into a hang (which is exactly what happened once).
+    """
     app = create_app()
     with TestClient(app) as test_client:
         app.state.live_call_client_factory = lambda session: client_obj
+        app.state.live_call_registry = SessionRegistry(
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                LIVE_CALL_ALERT_MIN_FAKE_WINDOWS=min_fake_windows,
+            )
+        )
         yield test_client, client_obj
 
 
@@ -155,7 +171,7 @@ def test_health_reports_provider_configuration_without_the_key():
 
 def test_fake_verdict_produces_detector_result_and_alert():
     detector = FakeDetectorClient([chunk("fake")], frames_per_window=2)
-    with harness(detector) as (test_client, _):
+    with harness(detector, min_fake_windows=1) as (test_client, _):
         session = create_session(test_client)
         with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
             assert ws.receive_json()["status"] == "connecting_to_detector"
@@ -237,16 +253,18 @@ def test_skipped_window_is_inconclusive():
     assert status["reason"] == "insufficient_voice_activity"
 
 
-def test_second_fake_window_upgrades_the_alert():
-    detector = FakeDetectorClient([chunk("fake"), chunk("fake", begin=4.0, end=8.0)])
-    with harness(detector) as (test_client, _):
+def test_a_sustained_run_upgrades_the_alert():
+    detector = FakeDetectorClient(
+        [chunk("fake", begin=b * 4.0, end=(b + 1) * 4.0) for b in range(4)]
+    )
+    with harness(detector, min_fake_windows=1) as (test_client, _):
         session = create_session(test_client)
         with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
             ws.receive_json()
             ws.send_json({"type": "start"})
             ws.receive_json()
-            ws.send_bytes(SILENT_FRAME)
-            ws.send_bytes(SILENT_FRAME)
+            for _ in range(4):
+                ws.send_bytes(SILENT_FRAME)
             events = drain_until(
                 ws, lambda e: e.get("code") == "SYNTHETIC_VOICE_EVIDENCE"
             )
@@ -405,7 +423,7 @@ def test_status_endpoint_exposes_metrics_but_no_audio_or_key():
 
 def test_speech_start_mark_moves_the_latency_origin():
     detector = FakeDetectorClient([chunk("fake")])
-    with harness(detector) as (test_client, _):
+    with harness(detector, min_fake_windows=1) as (test_client, _):
         session = create_session(test_client)
         with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
             ws.receive_json()
@@ -418,3 +436,74 @@ def test_speech_start_mark_moves_the_latency_origin():
     alert = [e for e in events if e["type"] == "alert"][0]
     # Latency is measured from the speech mark, so it is small in a fast test.
     assert 0.0 <= alert["latency_seconds"] < 5.0
+
+
+# --- false-alarm suppression --------------------------------------------
+
+
+def test_a_single_fake_window_does_not_alert_under_the_default_policy():
+    """The production default needs a run of two consecutive fake windows.
+
+    The best benchmarked local model false-alarms on roughly 10% of
+    individual 4 s windows. Alerting on one window would flag a genuine human
+    caller most of the way through a one-minute call.
+    """
+    detector = FakeDetectorClient([chunk("fake"), chunk("real", begin=4.0, end=8.0)])
+    with harness(detector, min_fake_windows=2) as (test_client, _):
+        session = create_session(test_client)
+        with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "start"})
+            ws.receive_json()
+            ws.send_bytes(SILENT_FRAME)
+            ws.send_bytes(SILENT_FRAME)
+            ws.send_json({"type": "stop"})
+            events = drain_until(ws, lambda e: e.get("status") == "stopped", limit=40)
+
+    assert not [e for e in events if e["type"] == "alert"], "one window must not alert"
+    # The user is told evidence is building, not that nothing was found.
+    building = [e for e in events if e.get("reason") == "building_evidence"]
+    assert building, "a sub-threshold signal should still be surfaced"
+    assert "needed to warn" in building[0]["detail"]
+
+
+def test_two_consecutive_fake_windows_do_alert():
+    detector = FakeDetectorClient([chunk("fake"), chunk("fake", begin=4.0, end=8.0)])
+    with harness(detector, min_fake_windows=2) as (test_client, _):
+        session = create_session(test_client)
+        with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "start"})
+            ws.receive_json()
+            ws.send_bytes(SILENT_FRAME)
+            ws.send_bytes(SILENT_FRAME)
+            events = drain_until(ws, lambda e: e["type"] == "alert")
+
+    alert = [e for e in events if e["type"] == "alert"][0]
+    assert alert["code"] == "POTENTIAL_SYNTHETIC_VOICE"
+    assert alert["provisional"] is True
+
+
+def test_isolated_false_positives_separated_by_a_clean_window_never_alert():
+    """A clean window breaks the run, so scattered noise cannot accumulate."""
+    detector = FakeDetectorClient(
+        [
+            chunk("fake", begin=0.0, end=4.0),
+            chunk("real", begin=4.0, end=8.0),
+            chunk("fake", begin=8.0, end=12.0),
+            chunk("real", begin=12.0, end=16.0),
+            chunk("fake", begin=16.0, end=20.0),
+        ]
+    )
+    with harness(detector, min_fake_windows=2) as (test_client, _):
+        session = create_session(test_client)
+        with test_client.websocket_connect(f"/ws/live-calls/{session['session_id']}") as ws:
+            ws.receive_json()
+            ws.send_json({"type": "start"})
+            ws.receive_json()
+            for _ in range(5):
+                ws.send_bytes(SILENT_FRAME)
+            ws.send_json({"type": "stop"})
+            events = drain_until(ws, lambda e: e.get("status") == "stopped", limit=60)
+
+    assert not [e for e in events if e["type"] == "alert"]

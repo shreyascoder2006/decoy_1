@@ -20,6 +20,7 @@ const OFFSCREEN_PATH = 'offscreen.html';
 const WHATSAPP_HOSTS = ['web.whatsapp.com'];
 const ALERT_NOTIFICATION_ID = 'live-call-synthetic-voice';
 const STATE_KEY = 'liveCallState';
+const TESTING_MODE_KEY = 'allowAnyTab';
 
 const STATUS = {
   IDLE: 'Idle',
@@ -54,7 +55,9 @@ const DEFAULT_STATE = {
   errorMessage: null,
   framesSent: 0,
   inputSampleRate: null,
-  tabId: null
+  tabId: null,
+  testingMode: false,
+  capturedUrl: null
 };
 
 // ---------------------------------------------------------------------------
@@ -185,14 +188,38 @@ function isWhatsAppWebUrl(url) {
   }
 }
 
+async function isTestingModeEnabled() {
+  try {
+    const stored = await chrome.storage.local.get(TESTING_MODE_KEY);
+    return Boolean(stored[TESTING_MODE_KEY]);
+  } catch (error) {
+    return false;
+  }
+}
+
 async function findTargetTab() {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (active && isWhatsAppWebUrl(active.url)) {
-    return { tab: active };
+  if (!active) {
+    return { error: 'No active tab was found in this window.' };
   }
+
+  // Testing mode captures whatever tab is in front, so you can validate the
+  // capture/PCM/alert chain against a tab playing a known sample before
+  // spending call minutes. It needs no extra Chrome permission precisely
+  // because the host check is skipped: the tab URL is never read.
+  if (await isTestingModeEnabled()) {
+    return { tab: active, testingMode: true };
+  }
+
+  if (isWhatsAppWebUrl(active.url)) {
+    return { tab: active, testingMode: false };
+  }
+
   return {
     error:
-      'Open https://web.whatsapp.com in the active tab, answer the call there, then press Start Protection.'
+      'Open https://web.whatsapp.com in the active tab and answer the call there, ' +
+      'then press Start Protection. To capture a different tab for testing, ' +
+      'enable "Capture any tab" in the popup.'
   };
 }
 
@@ -232,7 +259,7 @@ async function startProtection() {
   await writeState({ status: STATUS.STARTING });
   await setBadge('...', '#2B598A');
 
-  const { tab, error: tabError } = await findTargetTab();
+  const { tab, testingMode, error: tabError } = await findTargetTab();
   if (tabError) {
     await failStart('NO_WHATSAPP_TAB', tabError);
     return { ok: false, error: tabError };
@@ -287,7 +314,11 @@ async function startProtection() {
     mockMode: Boolean(session.mock_mode),
     startedAt: Date.now(),
     inputSampleRate: result.inputSampleRate || null,
-    tabId: tab.id
+    tabId: tab.id,
+    testingMode: Boolean(testingMode),
+    // Only recorded when the host check was applied, so testing mode does
+    // not start logging arbitrary URLs.
+    capturedUrl: testingMode ? null : 'web.whatsapp.com'
   });
   return { ok: true, state: next };
 }
@@ -470,7 +501,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === 'GET_STATE') {
-    readState().then((state) => sendResponse({ ok: true, state }));
+    (async () => {
+      const state = await readState();
+      sendResponse({
+        ok: true,
+        state,
+        testingModeEnabled: await isTestingModeEnabled()
+      });
+    })();
+    return true;
+  }
+  if (message.type === 'SET_TESTING_MODE') {
+    (async () => {
+      await chrome.storage.local.set({
+        [TESTING_MODE_KEY]: Boolean(message.enabled)
+      });
+      sendResponse({ ok: true, enabled: Boolean(message.enabled) });
+    })();
     return true;
   }
 

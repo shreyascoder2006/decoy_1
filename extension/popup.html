@@ -18,6 +18,11 @@
         plumbing tests and carry no evidential value.
       </div>
 
+      <div id="testing-banner" class="banner banner--mock" hidden>
+        <strong>Testing mode.</strong> Capturing the active tab without
+        verifying it is WhatsApp Web.
+      </div>
+
       <section class="status-card" id="status-card">
         <span class="status-label">Status</span>
         <span class="status-value" id="status-value">Idle</span>
@@ -42,6 +47,20 @@
         <button id="stop" class="button button--secondary" type="button" disabled>
           Stop Protection
         </button>
+      </section>
+
+      <section class="testing">
+        <label class="toggle">
+          <input type="checkbox" id="testing-mode" />
+          <span class="toggle-text">
+            <strong>Capture any tab (testing)</strong>
+            <small>
+              Skips the WhatsApp Web host check so you can validate capture
+              against a tab playing a known sample. Needs no extra permission:
+              the tab URL is not read at all.
+            </small>
+          </span>
+        </label>
       </section>
 
       <section class="readout">

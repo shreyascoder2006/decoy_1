@@ -157,6 +157,40 @@ body {
   cursor: not-allowed;
 }
 
+.testing {
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+
+.toggle {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.toggle input {
+  margin: 2px 0 0;
+  flex: none;
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.toggle-text strong {
+  font-size: 12px;
+}
+
+.toggle-text small {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
 .metrics {
   margin: 0;
   display: grid;

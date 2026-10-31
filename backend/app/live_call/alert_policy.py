@@ -8,8 +8,22 @@ Design rules (from the build specification):
   synthetic signal in the audio analysed so far".
 * A missing label, a ``skipped`` window, or a provider error is never
   rendered as a real/fake verdict.
-* Do not re-alert on every analysis window. Alert once when the first
-  synthetic-audio signal appears, and once more if the evidence strengthens.
+* Do not re-alert on every analysis window. Alert once when the evidence
+  threshold is first met, and once more if it strengthens.
+* Require a *run* of consecutive synthetic windows, not a single one.
+
+That last rule comes from measurement, not taste. The best local model
+benchmarked here (Hemgg, AUC 0.889 over 40 human vs 20 neural-TTS samples)
+false-alarms on about 10% of individual 4-second windows at its best
+threshold. Alerting on the first fake window would therefore flag a genuine
+human caller with probability 1 - 0.9^n over n windows: roughly 79% across a
+one-minute call. Requiring two consecutive fake windows cuts that to around
+13% while still catching a real AI caller easily, because a true positive
+recurs window after window and a false positive usually does not.
+
+``min_fake_windows`` is configurable so a provider with a better measured
+false-alarm rate can alert faster. Skipped windows do not break a run -- a
+pause in speech is not evidence either way.
 """
 
 from __future__ import annotations
@@ -66,10 +80,14 @@ class PolicyOutcome:
 class AlertPolicy:
     """Stateful per-session policy. Not thread-safe; one instance per session."""
 
-    def __init__(self, session_id: str, provider: str) -> None:
+    def __init__(
+        self, session_id: str, provider: str, min_fake_windows: int = 1
+    ) -> None:
         self.session_id = session_id
         self.provider = provider
+        self.min_fake_windows = max(1, int(min_fake_windows))
         self.fake_window_count = 0
+        self.consecutive_fake_windows = 0
         self.real_window_count = 0
         self.skipped_window_count = 0
         self.alert_raised = False
@@ -140,7 +158,12 @@ class AlertPolicy:
 
         if label == LABEL_FAKE:
             self.fake_window_count += 1
-            if not self.alert_raised:
+            self.consecutive_fake_windows += 1
+
+            if (
+                not self.alert_raised
+                and self.consecutive_fake_windows >= self.min_fake_windows
+            ):
                 self.alert_raised = True
                 alert = AlertEvent(
                     level="high",
@@ -152,7 +175,11 @@ class AlertPolicy:
                 )
                 outcome.alert = alert
                 outcome.events.append(alert)
-            elif not self.upgraded:
+            elif (
+                self.alert_raised
+                and not self.upgraded
+                and self.consecutive_fake_windows >= self.min_fake_windows + 2
+            ):
                 self.upgraded = True
                 alert = AlertEvent(
                     level="high",
@@ -164,11 +191,28 @@ class AlertPolicy:
                 )
                 outcome.alert = alert
                 outcome.events.append(alert)
+            elif not self.alert_raised:
+                # Evidence is building but has not met the bar. Say so rather
+                # than either alarming or implying the caller is cleared.
+                outcome.events.append(
+                    self._status(
+                        STATUS_ANALYSING,
+                        reason="building_evidence",
+                        detail=(
+                            f"A synthetic-speech signal appeared in "
+                            f"{self.consecutive_fake_windows} of the last "
+                            f"{self.min_fake_windows} windows needed to warn."
+                        ),
+                    )
+                )
             # Further fake windows update state silently -- no new notification.
             return outcome
 
         if label == LABEL_REAL:
             self.real_window_count += 1
+            # A clean window breaks the run: an isolated false positive should
+            # not combine with a much later one to trip the alert.
+            self.consecutive_fake_windows = 0
             outcome.events.append(
                 self._status(STATUS_NO_SIGNAL, detail=DETAIL_NO_SIGNAL)
             )

@@ -1,0 +1,12 @@
+# Dependencies for the local open-source detector (LIVE_CALL_PROVIDER=local).
+# Not needed if you use a hosted provider or the mock.
+#
+# Install the CPU-only torch build unless you have CUDA; the default PyPI
+# wheel pulls in several GB of CUDA libraries you will not use:
+#
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+#   pip install -r requirements-local-model.txt
+#
+-r requirements.txt
+torch>=2.2
+transformers>=4.40

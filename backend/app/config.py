@@ -31,10 +31,37 @@ class Settings(BaseSettings):
     )
 
     # --- Provider selection ---------------------------------------------
-    live_call_provider: Literal["resemble", "mock"] = Field(
-        default="resemble", alias="LIVE_CALL_PROVIDER"
+    live_call_provider: Literal["resemble", "local", "mock"] = Field(
+        default="local", alias="LIVE_CALL_PROVIDER"
     )
     live_call_mock_mode: bool = Field(default=False, alias="LIVE_CALL_MOCK_MODE")
+
+    # --- Local open-source detector --------------------------------------
+    # Runs in-process: no credential, no credits, no network at call time.
+    live_call_local_model_id: str = Field(
+        # Benchmarked choice, not the most downloaded one: see
+        # scripts/benchmark_detectors.py and docs/DETECTOR_BENCHMARK.md.
+        default="Hemgg/Deepfake-audio-detection",
+        alias="LIVE_CALL_LOCAL_MODEL_ID",
+    )
+    live_call_local_device: str = Field(default="cpu", alias="LIVE_CALL_LOCAL_DEVICE")
+    live_call_local_window_seconds: float = Field(
+        default=4.0, alias="LIVE_CALL_LOCAL_WINDOW_SECONDS"
+    )
+    # Calibration-dependent. Tune on your own samples with scripts/detect_file.py.
+    live_call_local_fake_threshold: float = Field(
+        default=0.9, alias="LIVE_CALL_LOCAL_FAKE_THRESHOLD"
+    )
+    # Voice-activity floor. Windows quieter than this are reported as skipped
+    # rather than labelled, so silence cannot raise an alert.
+    live_call_local_min_rms: float = Field(
+        default=0.005, alias="LIVE_CALL_LOCAL_MIN_RMS"
+    )
+    # Escape hatch for a model whose own id2label is uninformative, e.g.
+    # "0=fake,1=real". Leave empty to trust the model's labels.
+    live_call_local_label_override: str = Field(
+        default="", alias="LIVE_CALL_LOCAL_LABEL_OVERRIDE"
+    )
 
     # --- Bind address ----------------------------------------------------
     live_call_host: str = Field(default="127.0.0.1", alias="LIVE_CALL_HOST")
@@ -68,6 +95,14 @@ class Settings(BaseSettings):
         default=10.0, alias="LIVE_CALL_FINAL_TIMEOUT_SECONDS"
     )
 
+    # --- Alert policy -----------------------------------------------------
+    # Consecutive synthetic windows required before warning. 1 warns fastest
+    # but multiplies the per-window false-alarm rate across a call; 2 is the
+    # measured compromise for the default local model. See alert_policy.
+    live_call_alert_min_fake_windows: int = Field(
+        default=2, alias="LIVE_CALL_ALERT_MIN_FAKE_WINDOWS"
+    )
+
     # --- Origin allowlist -------------------------------------------------
     # Comma-separated. "chrome-extension://*" allows any unpacked extension ID,
     # which is the practical default for a local hackathon demo because the ID
@@ -80,6 +115,20 @@ class Settings(BaseSettings):
     # --- Audio contract ---------------------------------------------------
     live_call_sample_rate: int = Field(default=16000, alias="LIVE_CALL_SAMPLE_RATE")
     live_call_channels: int = Field(default=1, alias="LIVE_CALL_CHANNELS")
+
+    @field_validator("live_call_local_fake_threshold")
+    @classmethod
+    def _threshold_range(cls, value: float) -> float:
+        if not 0.0 < value < 1.0:
+            raise ValueError("live_call_local_fake_threshold must be between 0 and 1")
+        return value
+
+    @field_validator("live_call_local_window_seconds")
+    @classmethod
+    def _window_range(cls, value: float) -> float:
+        if not 0.5 <= value <= 30.0:
+            raise ValueError("live_call_local_window_seconds must be 0.5-30")
+        return value
 
     @field_validator("live_call_max_frame_bytes")
     @classmethod
@@ -101,6 +150,11 @@ class Settings(BaseSettings):
         presenting fabricated verdicts as real ones.
         """
         return self.live_call_mock_mode or self.live_call_provider == "mock"
+
+    @property
+    def use_local_provider(self) -> bool:
+        """True when detection runs in-process with no hosted provider."""
+        return not self.use_mock_provider and self.live_call_provider == "local"
 
     @property
     def public_base_url(self) -> str:

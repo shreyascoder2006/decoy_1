@@ -9,21 +9,30 @@ an advisory desktop warning while the call is still in progress.
 > identify the caller, prove intent, or guarantee that every AI-generated voice
 > is detected. Treat every result as advisory.
 
+Detection runs **locally by default** — an open-source model in the backend
+process, so there is no API key, no credits and no network call at detection
+time. A hosted provider (Resemble streaming) and an explicitly-labelled mock
+are available as alternatives behind the same interface.
+
 ---
 
 ## Status of this build
 
 | Area | State |
 |---|---|
-| Backend relay, session lifecycle, alert policy | Implemented, 105 automated tests passing |
+| Backend relay, session lifecycle, alert policy | Implemented, 194 automated tests passing |
 | PCM capture maths (downmix, resample, s16le, framing) | Implemented, 28 automated tests passing |
-| Real-time streaming over a live WebSocket | **Verified** against a running uvicorn (see below) |
+| Real-time streaming over a live WebSocket | **Verified** against a running uvicorn |
+| **Local detector actually flagging AI speech** | **Verified end to end.** AI call → alert in 8.13 s; genuine human call → no alert. See [docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md) |
+| Detector model selection | **Measured, not assumed.** 4 of 5 popular models were *inverted* on neural TTS |
 | Chrome extension code (capture, playback, UI, notifications) | Implemented; **not executed** — no Chrome or display in the build environment |
-| Real provider detection verdict | **Not verified** — no API key available. The endpoint was reached and returned HTTP 401 for a dummy key, so the URL, the `extra_params` encoding and the Bearer auth path are exercised; only a valid credential is missing |
-| First-speech-to-alert latency on a real call | **Not measured** — requires two WhatsApp accounts and Chrome |
+| Hosted provider (Resemble) verdict | **Not verified** — no API key. The endpoint was reached and returned HTTP 401 for a dummy key, so the URL, `extra_params` encoding and Bearer auth path are exercised; only a credential is missing |
+| Latency on a real WhatsApp call | **Not measured** — needs two accounts and Chrome |
+| Accuracy against commercial TTS / voice clones | **Not measured.** Validated against VITS only |
 
-Nothing in this repository fabricates a detection verdict. With no credential
-the system reports `DETECTOR_UNAVAILABLE`; it never falls back to a guess.
+Nothing in this repository fabricates a detection verdict. With no working
+detector the system reports `DETECTOR_UNAVAILABLE`; it never falls back to a
+guess, and mock mode must be enabled explicitly.
 
 ---
 
@@ -44,14 +53,21 @@ Chrome MV3 extension
 FastAPI backend  (backend/app/live_call/)
   router.py           session creation + WebSocket endpoint
   session_manager.py  3-task relay with a bounded audio queue
-  resemble_client.py  authenticated upstream stream   ← the API key lives ONLY here
-  alert_policy.py     provider label → user-facing alert
+  alert_policy.py     label → alert, needs a RUN of synthetic windows
+        │
+        ├── local_model_client.py   in-process model (DEFAULT, no credential)
+        ├── resemble_client.py      hosted stream  ← the API key lives ONLY here
+        └── resemble_client.py      MockDetectorClient (scripted, opt-in only)
         │
         ▼
-Streaming deepfake-detection provider  (~4 s analysis windows)
+~4 s analysis windows → per-window label + P(fake)
         │
         ▼
 JSON events back to the extension → desktop notification + badge + popup
+
+All three detectors implement one `DetectorClient` interface, so the alert
+policy, metrics, WebSocket protocol and extension are identical whichever you
+run.
 ```
 
 The audio branch and the playback branch are separate, so the call stays
@@ -80,11 +96,15 @@ backend/
       schemas.py                typed protocol models (all three boundaries)
       session_manager.py        per-call lifecycle, backpressure, cleanup
       audio_format.py           streaming WAV header + PCM frame checks
-      resemble_client.py        real provider adapter + labelled mock
-      alert_policy.py           verdict → alert mapping
+      resemble_client.py        hosted provider adapter + labelled mock
+      local_model_client.py     in-process open-source detector (default)
+      label_vocab.py            normalises each model's own class names
+      alert_policy.py           verdict → alert, with the run requirement
       metrics.py                latency timestamps and counters
-  tests/                        105 tests
+  tests/                        194 tests
   scripts/local_stream_check.py real-time streaming integration check
+  scripts/detect_file.py        run a WAV through the whole stack
+  requirements-local-model.txt  torch + transformers
   requirements.txt              runtime deps
   requirements-dev.txt          + test deps
   .env.example                  copy to .env
@@ -98,7 +118,9 @@ extension/
   icons/                        generated PNGs
   tests/audio-dsp.test.js       28 tests
 scripts/validate_extension.py   static manifest / reference / secret checks
+scripts/benchmark_detectors.py  compare detector models on your own samples
 docs/LIVE_CALL_MANUAL_TEST.md   the real two-account test procedure
+docs/DETECTOR_BENCHMARK.md      how the default model was chosen, and its limits
 ```
 
 ---
@@ -113,12 +135,24 @@ python3 -m venv ../.venv
 ../.venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
+For the default local detector, install the CPU-only torch build (the default
+PyPI wheel drags in several GB of unused CUDA libraries):
+
+```bash
+../.venv/bin/python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+```
+
+```bash
+cd backend && ../.venv/bin/python -m pip install -r requirements-local-model.txt
+```
+
 ```bash
 cd backend && cp .env.example .env
 ```
 
-Then edit `.env` and set `RESEMBLE_API_KEY` to a key with streaming detection
-access. Leave `LIVE_CALL_MOCK_MODE=false`.
+The defaults work with no credential. The model (~378 MB) downloads on first
+use and loads in about 2 s thereafter. To use the hosted provider instead, set
+`LIVE_CALL_PROVIDER=resemble` and `RESEMBLE_API_KEY`.
 
 ```bash
 cd backend && PYTHONPATH=. ../.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
@@ -130,8 +164,10 @@ Confirm it is up and sees your credential:
 curl -s http://127.0.0.1:8000/health
 ```
 
-`provider_key_configured` must be `true` for real detection. If it is `false`,
-every session will report `DETECTOR_UNAVAILABLE` — by design.
+With the local detector, `provider` reads `local` and
+`provider_key_configured` is irrelevant. With `resemble`,
+`provider_key_configured` must be `true` or every session reports
+`DETECTOR_UNAVAILABLE` — by design.
 
 ### 2. Chrome extension
 
@@ -156,7 +192,14 @@ All of these live in `backend/.env`. Never commit it; `.gitignore` excludes it.
 |---|---|---|
 | `RESEMBLE_API_KEY` | *(empty)* | Provider credential. **Server-side only.** |
 | `RESEMBLE_STREAM_URL` | `wss://stream.resemble.ai/api/v1/detect/audio` | Upstream streaming endpoint |
-| `LIVE_CALL_PROVIDER` | `resemble` | `resemble` or `mock` |
+| `LIVE_CALL_PROVIDER` | `local` | `local`, `resemble` or `mock` |
+| `LIVE_CALL_LOCAL_MODEL_ID` | `Hemgg/Deepfake-audio-detection` | Chosen by measurement — see the benchmark doc |
+| `LIVE_CALL_LOCAL_FAKE_THRESHOLD` | `0.9` | Decision threshold on P(fake). Tune on your own samples |
+| `LIVE_CALL_LOCAL_WINDOW_SECONDS` | `4.0` | Analysis window. Lower for faster alerts, noisier windows |
+| `LIVE_CALL_LOCAL_MIN_RMS` | `0.005` | Voice-activity floor; quieter windows are skipped, never labelled |
+| `LIVE_CALL_LOCAL_DEVICE` | `cpu` | `cpu` or `cuda` |
+| `LIVE_CALL_LOCAL_LABEL_OVERRIDE` | *(empty)* | Only for a model with uninformative labels, e.g. `0=fake,1=real` |
+| `LIVE_CALL_ALERT_MIN_FAKE_WINDOWS` | `2` | Consecutive synthetic windows required to warn |
 | `LIVE_CALL_MOCK_MODE` | `false` | Explicit opt-in to the scripted detector |
 | `LIVE_CALL_HOST` / `LIVE_CALL_PORT` | `127.0.0.1` / `8000` | Bind address |
 | `LIVE_CALL_PUBLIC_BASE_URL` | *(derived)* | Override the WS URL handed to the extension |
@@ -189,15 +232,45 @@ cd extension && npm test
 python3 scripts/validate_extension.py extension
 ```
 
-Real-time streaming check against a running backend (use `LIVE_CALL_MOCK_MODE=true`
-for a plumbing-only run):
+### The test ladder
+
+Each rung isolates one failure, so you never debug four things at once.
+
+**1. Does the detector flag your AI samples at all?** No Chrome, no WhatsApp:
+
+```bash
+cd backend && PYTHONPATH=. ../.venv/bin/python scripts/detect_file.py my-ai-sample.wav --expect fake
+```
+
+```bash
+cd backend && PYTHONPATH=. ../.venv/bin/python scripts/detect_file.py my-human-sample.wav --expect real
+```
+
+If it cannot flag a clean file, it will not flag the same voice after
+WhatsApp's noise suppression and Opus codec. Fix this rung first.
+
+**2. Which model is best on your samples?**
+
+```bash
+python3 scripts/benchmark_detectors.py --human-dir mysamples/human --fake-dir mysamples/ai
+```
+
+**3. Does Chrome capture, playback and alerting work?** Tick **Capture any
+tab (testing)** in the popup, open a tab playing your AI sample, and press
+Start Protection. This validates the whole browser chain without spending
+call minutes.
+
+**4. The real call.** See [docs/LIVE_CALL_MANUAL_TEST.md](docs/LIVE_CALL_MANUAL_TEST.md).
+
+### Transport-only check
 
 ```bash
 cd backend && PYTHONPATH=. ../.venv/bin/python scripts/local_stream_check.py --seconds 13
 ```
 
-Its exit codes: `0` verdict delivered, `1` backend unreachable,
-`2` detector unavailable, `3` no verdict (too little audio).
+Exit codes for both scripts: `0` verdict delivered, `1` backend unreachable,
+`2` detector unavailable, `3` nothing analysable, `4` verdict did not match
+`--expect`.
 
 ---
 
@@ -208,9 +281,11 @@ threshold for a score whose calibration we do not control.
 
 | Provider result | What the user sees |
 |---|---|
-| first `fake` on a voice-active window | **Potential AI-generated voice detected** — desktop notification, `AI` badge, marked *provisional* |
-| a second `fake` window | **Stronger synthetic-audio evidence** — upgraded once, then silent |
+| a `fake` window, below the run threshold | "A synthetic-speech signal appeared in 1 of the 2 windows needed to warn" — no notification |
+| **2 consecutive** `fake` windows | **Potential AI-generated voice detected** — desktop notification, `AI` badge, marked *provisional* |
+| a run of 4 | **Stronger synthetic-audio evidence** — upgraded once, then silent |
 | further `fake` windows | state updates silently; no repeated toast |
+| a `real` window | breaks the run, so scattered false positives cannot accumulate |
 | `real` | "No synthetic signal detected in analysed audio so far" — **never** "caller verified" |
 | `label: null` or `chunk_label: "skipped"` | "Insufficient speech — continuing analysis" |
 | provider error, or no credential | "Detection unavailable" — **never** a real/fake verdict |
@@ -229,17 +304,24 @@ the one that matters. 5–10 s is the engineering target to test, not a
 guarantee: a caller who speaks little, pauses, or has poor audio will take
 longer, and some windows will be skipped entirely.
 
-Measured on the live streaming check in mock mode, where the first window is
-deliberately scripted as `skipped`:
+Because the policy needs two consecutive synthetic windows, the earliest
+possible alert is about two window lengths — roughly **8 s** at the default
+4 s window. That is the top of the 5–10 s target band, and it is a deliberate
+trade: alerting on one window would false-alarm on most genuine calls (see
+[docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md)). Set
+`LIVE_CALL_LOCAL_WINDOW_SECONDS=3.0` for a ~6 s floor if you accept shorter,
+noisier windows.
+
+Measured end to end with the local detector at 1× real time:
 
 ```text
-first-verdict latency  3.95 s   (first window completed, skipped)
-first-alert latency    8.00 s   (second window returned fake)
+AI call    first verdict 4.12 s   first alert 8.13 s   upgrade 16.2 s
+Human call first verdict 4.11 s   no alert raised
 ```
 
-That shape — one skipped window then a verdict — is the realistic case, and it
-lands inside the 5–10 s band. **It is not evidence about detection accuracy,**
-only about the pipeline's timing.
+Both runs dropped zero frames, so inference keeps up with real time on 4 CPU
+threads. **This is pipeline timing on VITS-generated audio, not an accuracy
+claim about your AI voice.**
 
 ---
 
@@ -291,15 +373,25 @@ rules require it. The popup carries this disclosure.
 2. **Extension code is unexecuted.** It is written to the documented
    `tabCapture` + `offscreen` contract but has not run in a browser here. The
    first real run is step 6 of `docs/LIVE_CALL_MANUAL_TEST.md`.
-3. **Provider verdicts are unverified.** The transport is proven; the detection
-   is not.
-4. **WhatsApp's own noise suppression and codec** may degrade an acoustically
+3. **Detection is validated against one TTS family only.** All AI samples were
+   VITS (`facebook/mms-tts-eng`). Nothing here predicts behaviour on
+   ElevenLabs, PlayHT, Cartesia, OpenAI TTS or a clone of a specific person —
+   which is what a real attacker uses. Benchmark your own samples.
+4. **The false-alarm rate is non-trivial.** ~10% of individual windows on
+   clean human speech at the default threshold. The two-window run requirement
+   suppresses most of it, but a long call can still produce a false warning.
+5. **LibriSpeech is not a phone call.** The human corpus is clean, close-miked
+   audiobook speech. Real calls are noisy, compressed and accented, so the
+   measured rates may not transfer.
+6. **The hosted provider path is unverified.** Reached, authenticated-rejected
+   with a dummy key, never run with a real one.
+7. **WhatsApp's own noise suppression and codec** may degrade an acoustically
    injected synthetic sample enough to change the verdict. Prefer a virtual
    audio device on the caller side for repeatable tests.
-5. **Linear-interpolation resampling** has no anti-aliasing filter, so content
+8. **Linear-interpolation resampling** has no anti-aliasing filter, so content
    above 8 kHz folds back. Acceptable for 16 kHz speech from a compressed call,
    but it is a quality compromise worth knowing about.
-6. **The client-side speech gate is a fixed RMS threshold** (0.01 over 0.3 s).
+9. **The client-side speech gate is a fixed RMS threshold** (0.01 over 0.3 s).
    It only moves the latency origin; it never gates audio or affects a verdict.
-7. **Single concurrent call per backend** is what has been exercised, though the
+10. **Single concurrent call per backend** is what has been exercised, though the
    registry allows up to 32 sessions.

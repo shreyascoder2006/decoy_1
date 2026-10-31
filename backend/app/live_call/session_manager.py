@@ -39,6 +39,7 @@ from app.live_call.audio_format import (
     is_plausible_pcm_frame,
 )
 from app.live_call.metrics import SessionMetrics
+from app.live_call.local_model_client import LocalModelDetectorClient
 from app.live_call.resemble_client import (
     DetectorClient,
     DetectorUnavailable,
@@ -113,7 +114,11 @@ class LiveCallSession:
     def provider_name(self) -> str:
         if self._client is not None:
             return self._client.provider_name
-        return "mock" if self.settings.use_mock_provider else self.settings.live_call_provider
+        if self.settings.use_mock_provider:
+            return "mock"
+        if self.settings.use_local_provider:
+            return "local-model"
+        return self.settings.live_call_provider
 
     @property
     def is_mock(self) -> bool:
@@ -202,7 +207,8 @@ class LiveCallSession:
 
         self._policy = AlertPolicy(
             self.session_id,
-            "mock" if self.settings.use_mock_provider else self.settings.live_call_provider,
+            self.provider_name,
+            min_fake_windows=self.settings.live_call_alert_min_fake_windows,
         )
 
         try:
@@ -508,6 +514,17 @@ def default_client_factory(session: LiveCallSession) -> DetectorClient:
     if settings.use_mock_provider:
         return MockDetectorClient(
             session_id=session.session_id, contract=session.contract
+        )
+    if settings.use_local_provider:
+        return LocalModelDetectorClient(
+            session_id=session.session_id,
+            contract=session.contract,
+            model_id=settings.live_call_local_model_id,
+            device=settings.live_call_local_device,
+            window_seconds=settings.live_call_local_window_seconds,
+            fake_threshold=settings.live_call_local_fake_threshold,
+            min_rms=settings.live_call_local_min_rms,
+            label_override=settings.live_call_local_label_override,
         )
     return ResembleStreamingClient(
         api_key=settings.resemble_api_key,

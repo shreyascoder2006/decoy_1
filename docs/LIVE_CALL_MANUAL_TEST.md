@@ -19,16 +19,51 @@ Confirm **all** of these before you start. Each one has caused a failed demo.
       button is present. If it is not, this test cannot run and no amount of
       code will change that.
 - [ ] Chrome desktop, version 116 or later (`chrome://version`).
-- [ ] A provider API key **with streaming detection access and credits**.
-      Check the balance on the provider dashboard, not just that the key exists.
-- [ ] Audio samples ready on a second device or in a virtual audio input:
+- [ ] A working detector. With the default local model this needs no
+      credential, but the model must be downloaded and **validated on your own
+      samples first** (step 2 below). With `LIVE_CALL_PROVIDER=resemble` you
+      need a key with streaming access and credits — check the balance on the
+      dashboard, not just that the key exists.
+- [ ] Audio samples ready:
       1. a genuine human voice recording,
-      2. an AI/TTS-generated sample,
+      2. an AI/TTS sample from the engine you actually care about,
       3. ideally a voice-cloned sample of a voice **you own or have permission
          to use**.
+      Convert each to the wire format: `ffmpeg -i in.mp3 -ar 16000 -ac 1 -c:a pcm_s16le out.wav`
+- [ ] **A virtual audio device on the caller machine** (see the next section).
+      This is the single biggest determinant of whether the demo works.
 - [ ] **Consent.** Tell the person on account A that call audio will be
       captured and sent to a third-party detection service. If anyone other
       than you is on the call, get their agreement first.
+
+---
+
+## 0b. Getting the AI voice into the call
+
+This is where most attempts fail, and the failure looks exactly like a broken
+detector.
+
+**Do not hold a speaker up to the phone.** Acoustic injection stacks room
+noise, speaker colouration, WhatsApp's noise suppression and the Opus codec on
+top of a signal the detector needs reasonably clean. If it then fails to flag,
+you have learned nothing about the detector.
+
+**Make the caller side a computer with a virtual audio device.** The AI audio
+then enters the call digitally.
+
+| OS | Install | Then |
+|---|---|---|
+| macOS | [BlackHole](https://existential.audio/blackhole/) (2ch) | System Settings → Sound. Play the sample through BlackHole as output; select BlackHole as WhatsApp's microphone |
+| Windows | [VB-CABLE](https://vb-audio.com/Cable/) | Play the sample to "CABLE Input"; set "CABLE Output" as WhatsApp's microphone |
+| Linux | PipeWire/PulseAudio (built in) | `pactl load-module module-null-sink sink_name=aivoice` then select the `aivoice` monitor as the input |
+
+Caller side runs WhatsApp Web or WhatsApp Desktop on that machine; receiver
+side is your laptop with the extension. Your laptop still flags an *incoming*
+AI voice, which is exactly the scenario being demonstrated.
+
+To hear the sample yourself while it feeds the call, create a multi-output
+device (macOS: Audio MIDI Setup) or use VB-CABLE's "Listen to this device"
+option on Windows.
 
 ---
 
@@ -44,45 +79,59 @@ In a second terminal:
 curl -s http://127.0.0.1:8000/health
 ```
 
-**Required:** `"provider_key_configured": true` and `"mock_mode": false`.
+**Required:** `"mock_mode": false`. If it is `true` you are about to
+demonstrate a scripted result — stop and fix `.env`.
 
-If `mock_mode` is `true` you are about to demonstrate a scripted result. Stop
-and fix `.env`. If `provider_key_configured` is `false`, the run will correctly
-report `DETECTOR_UNAVAILABLE` and produce no verdict.
+With `"provider": "local"` no key is needed. With `"provider": "resemble"`,
+`"provider_key_configured"` must also be `true`, or every session will
+correctly report `DETECTOR_UNAVAILABLE` and produce no verdict.
+
+The local model downloads (~378 MB) on the first session and then loads in
+about 2 s. Do that once before the demo, not during it.
 
 Keep this terminal visible — its log is your evidence trail.
 
 ---
 
-## 2. Prove the provider path before involving WhatsApp
+## 2. Prove the detector flags YOUR samples, before involving WhatsApp
 
 Do this **first**. It isolates "the detector works" from "Chrome capture
-works", and takes 15 seconds.
+works", and it is the step most likely to reveal a showstopper.
 
 ```bash
-cd backend && PYTHONPATH=. ../.venv/bin/python scripts/local_stream_check.py --seconds 15
+cd backend && PYTHONPATH=. ../.venv/bin/python scripts/detect_file.py ../mysamples/ai.wav --expect fake
 ```
 
-Expected, with a valid key:
-
-```text
-status  connecting_to_detector
-status  ready                     ← the provider accepted the stream
-verdict label=... window=0.0-4.0s ← a real analysis window completed
-metrics frames=150 dropped=0 audio=15.0s
-RESULT: transport, verdict delivery and latency measurement all worked.
+```bash
+cd backend && PYTHONPATH=. ../.venv/bin/python scripts/detect_file.py ../mysamples/human.wav --expect real
 ```
 
-Interpretation:
+Use samples of at least 15 seconds: the policy needs two consecutive
+synthetic windows, so the earliest possible alert is ~8 s.
 
 | What you see | What it means | Do next |
 |---|---|---|
-| `status ready` then a `verdict` | the provider path works end to end | continue to step 3 |
-| `ERROR DETECTOR_UNAVAILABLE` | key, entitlement, credits or network | fix before going further; the server log has the reason |
-| `ready` but no verdict | every window was skipped | the synthetic tone is not voice-like; this is expected for a tone, so continue |
+| AI → `PASS`, human → `PASS` | the detector works on your material | continue to step 3 |
+| AI → `FAIL (got real)` | **the model does not recognise your TTS engine** | run the benchmark below; do not proceed until fixed |
+| human → `FAIL (got fake)` | false-alarm rate too high at this threshold | raise `LIVE_CALL_LOCAL_FAKE_THRESHOLD` |
+| `ERROR DETECTOR_UNAVAILABLE` | model failed to load, or missing provider key | the server log has the reason |
+| `nothing analysable` | too quiet or too short | check the sample is speech and ≥ 8 s |
 
-Note the exact label the provider gave a plain tone. It is useful context for
-step 7.
+If the AI sample is not flagged, find a better model for your data rather than
+hoping the live call goes differently:
+
+```bash
+python3 scripts/benchmark_detectors.py --human-dir mysamples/human --fake-dir mysamples/ai --thresholds 0.5,0.7,0.9,0.95
+```
+
+This matters more than it sounds. Of the five most-downloaded community
+models, **four scored AI speech lower than human speech** — see
+[DETECTOR_BENCHMARK.md](DETECTOR_BENCHMARK.md). Set the winner with
+`LIVE_CALL_LOCAL_MODEL_ID` and its best threshold with
+`LIVE_CALL_LOCAL_FAKE_THRESHOLD`.
+
+If no model separates your samples, say so and demo the recorded-audio path
+rather than staging a live call you expect to fail.
 
 ---
 
@@ -99,6 +148,31 @@ Then:
 2. Pin the extension to the toolbar.
 3. Click **Service worker** under the extension card to open its console. Keep
    it open; capture errors land there.
+
+---
+
+## 3b. Prove the browser chain without a call
+
+Before spending call minutes, validate capture, playback, PCM and alerting
+against a tab you control.
+
+1. Open the extension popup and tick **Capture any tab (testing)**.
+2. Open a new tab and start playing your AI sample (a local file in the
+   browser, or any page that plays it).
+3. With that tab in front, press **Start Protection**.
+
+Check:
+
+- [ ] A **Testing mode** banner appears in the popup.
+- [ ] You can still hear the sample playing.
+- [ ] The popup **Capture rate** shows something like `48.0 kHz → 16 kHz`.
+- [ ] Within ~10 s of speech, the desktop warning appears.
+
+If this works, the browser half of the system is proven and anything that
+fails later is specific to the WhatsApp call path.
+
+**Untick Capture any tab before the real demo**, so the host check is active
+again.
 
 ---
 
@@ -188,18 +262,24 @@ Call stayed audible throughout: yes / no
 
 Diagnose in this order, and do **not** jump to "the detector failed":
 
-1. Did any `verdict` line appear in the backend log at all?
-   - **No verdicts** → the provider skipped every window. Not enough
-     voice-active audio reached it. Speak longer and louder.
+1. Did step 2 pass on this same sample? If not, that is your answer — the
+   detector never recognised this voice, and the call path is irrelevant.
+2. Did any `verdict` line appear in the backend log at all?
+   - **No verdicts** → every window was skipped for insufficient voice
+     activity. Speak longer and louder.
    - **Verdicts with `chunk_label: "skipped"`** → same conclusion.
    - **Verdicts labelled `real`** → the detector analysed the audio and did not
-     find a synthetic signal. This is a genuine negative result, and it is a
-     legitimate finding — report it rather than hiding it.
-2. Was the sample injected acoustically? Room noise, speaker quality and
+     find a synthetic signal. A genuine negative result; report it rather than
+     hiding it.
+   - **Isolated `fake` windows but no alert** → working as designed. The
+     policy needs two *consecutive* synthetic windows, because a single
+     window false-alarms about 10% of the time. Keep the AI voice talking
+     continuously for 10–15 s.
+3. Was the sample injected acoustically? Room noise, speaker quality and
    WhatsApp's noise suppression and codec all degrade a synthetic sample.
-   **A failed acoustic injection is not a detector failure.** Retry with a
-   virtual audio input on the caller device if you have one.
-3. Check `frames_dropped` — dropped frames corrupt windows.
+   **A failed acoustic injection is not a detector failure.** Switch to the
+   virtual audio device from section 0b.
+4. Check `frames_dropped` — dropped frames corrupt windows.
 
 ---
 
@@ -253,10 +333,18 @@ you expected.
 - [ ] Null / skipped / provider-error results showed as inconclusive or unavailable
 - [ ] Stop Protection ended capture and cleaned up the backend session
 - [ ] First-speech-to-alert latency was measured and recorded: ______ s
-- [ ] Whether the **real** provider or the **mock** was used: ____________
+      (expect ≥ 8 s: two consecutive 4 s windows are required)
+- [ ] Which detector was used: **local model** / **hosted provider** / **mock**
+- [ ] Model id and threshold: ______________________ / ______
+- [ ] The genuine human call raised **no** alert: yes / no
+- [ ] Step 2 had already passed on these same samples: yes / no
 
-If the last line says "mock", the feature has **not** been demonstrated. Say so
-plainly rather than describing the system as working end to end.
+If the detector line says "mock", the feature has **not** been demonstrated.
+Say so plainly rather than describing the system as working end to end.
+
+If the human call *did* raise an alert, report the false-positive rate you
+observed. A detector that flags everyone is not a detector, and a demo that
+hides this is worse than no demo.
 
 ---
 
@@ -274,5 +362,9 @@ realistic shape of one skipped window followed by a verdict. The popup will
 show a **Mock detector active** banner and every event is tagged
 `provider: "mock"`, so a scripted verdict cannot be mistaken for a real one.
 
-This exercises the whole chain except the provider. It proves nothing about
+This exercises the whole chain except the detector. It proves nothing about
 detection.
+
+For a repeatable test that *does* exercise the real detector, use
+`scripts/detect_file.py` (step 2) rather than the mock. It runs the actual
+model over a fixed file, so results are comparable run to run.
