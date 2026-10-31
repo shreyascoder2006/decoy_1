@@ -21,6 +21,11 @@ node_modules/
 .idea/
 .vscode/
 
+# Private mail and audio samples used for local benchmarking: never commit
+mysamples/
+Takeout/
+*.mbox
+
 # Local artifacts
 *.log
 dist/

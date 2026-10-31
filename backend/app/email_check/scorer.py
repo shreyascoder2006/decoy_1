@@ -73,6 +73,21 @@ PAYMENT_FRAUD = re.compile(
     re.IGNORECASE,
 )
 
+# Chat-only: patterns that are routine scam openers on messaging apps but
+# unremarkable in email, so they are scored only for the chat channel.
+SCAM_OFFER = re.compile(
+    r"\b(you(?:'ve| have)? won|lottery|claim your (?:prize|reward|gift)|"
+    r"work from home|part[- ]time job|guaranteed returns?|investment opportunity|"
+    r"double your money|kyc (?:update|verification|expired)|"
+    r"earn\s+\S*\d[\d,]*\s*(?:per|a|/)\s*(?:day|hour|week))\b",
+    re.IGNORECASE,
+)
+FAMILY_IMPERSONATION = re.compile(
+    r"\b(hi (?:mum|mom|dad)|(?:this is )?my new (?:phone )?number|"
+    r"lost my phone|changed my number)\b",
+    re.IGNORECASE,
+)
+
 URL_LIKE_TEXT = re.compile(
     r"^(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[/?#]\S*)?$", re.IGNORECASE
 )
@@ -97,15 +112,19 @@ def registrable_domain(host: str) -> str:
 
 
 def _unwrap_redirect(href: str) -> str:
-    """Gmail and others wrap links as google.com/url?q=<real>; judge the target."""
+    """Gmail and WhatsApp wrap links in redirects (google.com/url?q=, l.wl.co/l?u=); judge the target."""
     try:
         parsed = urlparse(href)
-        if parsed.hostname and registrable_domain(parsed.hostname) == "google.com":
-            if parsed.path == "/url":
-                query = parse_qs(parsed.query)
-                target = (query.get("q") or query.get("url") or [""])[0]
-                if target.startswith(("http://", "https://")):
-                    return target
+        domain = registrable_domain(parsed.hostname) if parsed.hostname else ""
+        query = parse_qs(parsed.query)
+        target = ""
+        if domain == "google.com" and parsed.path == "/url":
+            target = (query.get("q") or query.get("url") or [""])[0]
+        elif domain == "wl.co" and parsed.path.startswith("/l"):
+            # WhatsApp wraps outbound links as l.wl.co/l?u=<real>.
+            target = (query.get("u") or [""])[0]
+        if target.startswith(("http://", "https://")):
+            return target
     except ValueError:
         pass
     return href
@@ -308,6 +327,116 @@ def _text_findings(request: EmailAnalyzeRequest) -> list[Finding]:
     return findings
 
 
+REASONS: dict[str, str] = {
+    "SENDER_BRAND_MISMATCH": (
+        "Scammers put a trusted company's name in the display name because most "
+        "mail apps show only the name. The real sending address belongs to an "
+        "unrelated domain, so the message is not from that company."
+    ),
+    "SENDER_NAME_SPOOFS_ADDRESS": (
+        "The display name shows one email address while the message was sent from "
+        "another. This is a deliberate trick to look legitimate at a glance."
+    ),
+    "LINK_TEXT_MISMATCH": (
+        "The visible link text names one website but clicking goes to another. "
+        "This is the most common phishing technique: you expect a familiar site "
+        "and land on a look-alike that collects your login."
+    ),
+    "LINK_IP_HOST": (
+        "Genuine companies link to named domains. A raw IP address usually means "
+        "a throwaway server set up to collect data, and it dodges domain-based "
+        "reputation checks."
+    ),
+    "LINK_PUNYCODE": (
+        "Domains starting with xn-- can display look-alike characters (for "
+        "example a Cyrillic 'a' for a Latin 'a'), making a fake site appear to be "
+        "a real one."
+    ),
+    "LINK_SHORTENER": (
+        "Shortened links hide the real destination, so neither you nor a mail "
+        "filter can see where it leads before you click."
+    ),
+    "LINK_SUSPICIOUS_TLD": (
+        "These domain endings are cheap or free and are over-represented among "
+        "throwaway scam sites. On its own this is weak evidence."
+    ),
+    "LINK_NOT_HTTPS": (
+        "The link is unencrypted. Reputable sites that ask for logins or "
+        "payments use HTTPS, so this is a weak signal that adds to others."
+    ),
+    "ATTACHMENT_DOUBLE_EXTENSION": (
+        "A name like invoice.pdf.exe shows a document ending first while the "
+        "file is really a program. The disguise exists to get you to run it."
+    ),
+    "ATTACHMENT_EXECUTABLE": (
+        "Programs and scripts can run code on your computer when opened, and "
+        "legitimate senders rarely email them."
+    ),
+    "ATTACHMENT_MACRO": (
+        "Macro-enabled Office files can run code once macros are enabled and "
+        "are a common route for delivering malware."
+    ),
+    "URGENCY_LANGUAGE": (
+        "Pressure to act immediately is used to stop you from checking first. "
+        "Genuine services rarely threaten closure within hours. Wording alone is "
+        "weak evidence, because real alerts can also sound urgent."
+    ),
+    "CREDENTIAL_REQUEST": (
+        "Legitimate companies do not ask you to send passwords, one-time codes or "
+        "card details by email. Asking for them is the core of credential phishing."
+    ),
+    "PAYMENT_REQUEST": (
+        "Changed bank details, wire transfers, gift cards and crypto are the "
+        "standard routes for invoice and impersonation fraud, because those "
+        "payments are hard to reverse."
+    ),
+}
+
+
+REASONS["SCAM_OFFER"] = (
+    "Prize wins, easy-money jobs, guaranteed returns and 'KYC expired' notices "
+    "are the standard openers of messaging-app scams. They are sent in bulk to "
+    "strangers and aim to move you to a payment or a link."
+)
+REASONS["FAMILY_IMPERSONATION"] = (
+    "'Hi Mum, this is my new number' is a well-known scam: the sender poses as a "
+    "relative on a new number, then asks for urgent money. Confirm by calling "
+    "the person's old number."
+)
+
+
+REASONS["MODEL_PHISHING_TEXT"] = (
+    "A pretrained language model, trained on phishing and legitimate emails, "
+    "rates the wording of this message as phishing-like. It reads only the text, "
+    "so it cannot see hidden link targets or the real sender; its confidence is "
+    "the model's own score, not a calibrated probability."
+)
+
+
+def with_model_finding(
+    findings: list[Finding], p_phishing: float, *, threshold: float, max_points: int
+) -> tuple[int, str, list[Finding], int]:
+    """Add the model's verdict as a finding and re-score. Returns score, level, findings, raw.
+
+    Points scale with the model's confidence and are capped at ``max_points``,
+    so the model alone stays below the "high" bar and needs corroboration.
+    """
+    combined = list(findings)
+    if p_phishing >= threshold:
+        combined.append(
+            Finding(
+                code="MODEL_PHISHING_TEXT",
+                message=f"Language model rates the wording as phishing-like ({round(100 * p_phishing)}% confidence).",
+                points=round(max_points * p_phishing),
+                reason=REASONS["MODEL_PHISHING_TEXT"],
+            )
+        )
+    combined.sort(key=lambda f: f.points, reverse=True)
+    raw = sum(f.points for f in combined)
+    score = min(100, raw)
+    return score, level_for(score), combined, raw
+
+
 def level_for(score: int) -> str:
     if score >= HIGH_AT:
         return "high"
@@ -316,16 +445,45 @@ def level_for(score: int) -> str:
     return "low"
 
 
-def score_email(request: EmailAnalyzeRequest) -> tuple[int, str, list[Finding]]:
-    """Return (score 0-100, level, findings sorted by weight)."""
+def _chat_findings(request: EmailAnalyzeRequest) -> list[Finding]:
+    findings: list[Finding] = []
+    if SCAM_OFFER.search(request.body):
+        findings.append(
+            Finding(
+                code="SCAM_OFFER",
+                message="Reads like a prize, easy-money or fake-notice scam message.",
+                points=25,
+            )
+        )
+    if FAMILY_IMPERSONATION.search(request.body):
+        findings.append(
+            Finding(
+                code="FAMILY_IMPERSONATION",
+                message="Claims to be a relative on a new number.",
+                points=20,
+            )
+        )
+    return findings
+
+
+def score_email(
+    request: EmailAnalyzeRequest, *, chat: bool = False
+) -> tuple[int, str, list[Finding], int]:
+    """Return (score 0-100, level, findings sorted by weight, raw points).
+
+    ``chat=True`` adds the messaging-scam rules; everything else is shared.
+    """
     if not request.body.strip() and not request.links and not request.attachments:
-        return 0, "unknown", []
+        return 0, "unknown", [], 0
     findings = (
         _sender_findings(request)
         + _link_findings(request)
         + _attachment_findings(request)
         + _text_findings(request)
+        + (_chat_findings(request) if chat else [])
     )
+    findings = [f.model_copy(update={"reason": REASONS.get(f.code, "")}) for f in findings]
     findings.sort(key=lambda f: f.points, reverse=True)
-    score = min(100, sum(f.points for f in findings))
-    return score, level_for(score), findings
+    raw = sum(f.points for f in findings)
+    score = min(100, raw)
+    return score, level_for(score), findings, raw

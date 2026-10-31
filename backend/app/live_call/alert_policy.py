@@ -93,8 +93,40 @@ class AlertPolicy:
         self.alert_raised = False
         self.upgraded = False
         self.last_label: str | None = None
+        # Detector scores for the current run of synthetic windows.
+        self._run_scores: list[float] = []
 
     # -- helpers ---------------------------------------------------------
+    def _evidence(self) -> tuple[int | None, list[str]]:
+        """Risk score and plain-language reasons for the current run."""
+        run = self.consecutive_fake_windows
+        reasons = [
+            f"{run} analysis windows in a row were classified as synthetic speech "
+            f"by the detector; at least {self.min_fake_windows} are required "
+            f"before warning."
+        ]
+        score: int | None = None
+        if self._run_scores:
+            average = sum(self._run_scores) / len(self._run_scores)
+            score = round(100 * average)
+            shown = ", ".join(f"{round(100 * s)}%" for s in self._run_scores[-6:])
+            reasons.append(
+                f"Detector confidence per window: {shown} (average {score}%). "
+                f"This is the model's own score, not a calibrated probability."
+            )
+        if self.real_window_count:
+            reasons.append(
+                f"{self.real_window_count} earlier window(s) were classified as "
+                f"human speech; a human-classified window resets the run, so this "
+                f"is a sustained pattern, not a one-off."
+            )
+        reasons.append(
+            "Why this matters: AI-generated voices are used in impersonation and "
+            "payment-fraud calls. The detector looks for speech patterns typical "
+            "of synthetic voices; it cannot prove who is speaking."
+        )
+        return score, reasons
+
     def _status(self, status: str, *, reason: str | None = None, detail: str | None = None) -> StatusEvent:
         return StatusEvent(
             status=status, session_id=self.session_id, reason=reason, detail=detail
@@ -159,12 +191,15 @@ class AlertPolicy:
         if label == LABEL_FAKE:
             self.fake_window_count += 1
             self.consecutive_fake_windows += 1
+            if message.aggregated_score is not None:
+                self._run_scores.append(float(message.aggregated_score))
 
             if (
                 not self.alert_raised
                 and self.consecutive_fake_windows >= self.min_fake_windows
             ):
                 self.alert_raised = True
+                risk_score, reasons = self._evidence()
                 alert = AlertEvent(
                     level="high",
                     code=CODE_POTENTIAL,
@@ -172,6 +207,8 @@ class AlertPolicy:
                     message=MESSAGE_POTENTIAL,
                     provisional=True,
                     session_id=self.session_id,
+                    risk_score=risk_score,
+                    reasons=reasons,
                 )
                 outcome.alert = alert
                 outcome.events.append(alert)
@@ -181,6 +218,7 @@ class AlertPolicy:
                 and self.consecutive_fake_windows >= self.min_fake_windows + 2
             ):
                 self.upgraded = True
+                risk_score, reasons = self._evidence()
                 alert = AlertEvent(
                     level="high",
                     code=CODE_STRONGER,
@@ -188,6 +226,8 @@ class AlertPolicy:
                     message=MESSAGE_STRONGER,
                     provisional=False,
                     session_id=self.session_id,
+                    risk_score=risk_score,
+                    reasons=reasons,
                 )
                 outcome.alert = alert
                 outcome.events.append(alert)
@@ -213,6 +253,7 @@ class AlertPolicy:
             # A clean window breaks the run: an isolated false positive should
             # not combine with a much later one to trip the alert.
             self.consecutive_fake_windows = 0
+            self._run_scores = []
             outcome.events.append(
                 self._status(STATUS_NO_SIGNAL, detail=DETAIL_NO_SIGNAL)
             )

@@ -75,6 +75,25 @@ class Settings(BaseSettings):
         default="", alias="LIVE_CALL_LOCAL_LABEL_OVERRIDE"
     )
 
+    # --- Email phishing-text model -------------------------------------------
+    # Empty id disables the model; the rule-based check still runs.
+    email_model_id: str = Field(default="", alias="EMAIL_MODEL_ID")
+    # Comma-separated output indexes that mean "phishing". Needed only for a
+    # model whose labels are generic (LABEL_0...); otherwise leave empty.
+    email_model_phishing_indexes: str = Field(default="", alias="EMAIL_MODEL_PHISHING_INDEXES")
+    email_model_threshold: float = Field(default=0.5, alias="EMAIL_MODEL_THRESHOLD")
+    # The model alone can add at most this many points. Below the "high" bar
+    # (55) on purpose: wording alone must not turn an email red.
+    email_model_max_points: int = Field(default=40, alias="EMAIL_MODEL_MAX_POINTS")
+
+    # --- WhatsApp chat scam-text model ---------------------------------------
+    # Separate from the email model: chat messages are short and informal, and
+    # a model's ranking on email says nothing about chat. Empty id disables it.
+    chat_model_id: str = Field(default="", alias="CHAT_MODEL_ID")
+    chat_model_phishing_indexes: str = Field(default="", alias="CHAT_MODEL_PHISHING_INDEXES")
+    chat_model_threshold: float = Field(default=0.5, alias="CHAT_MODEL_THRESHOLD")
+    chat_model_max_points: int = Field(default=40, alias="CHAT_MODEL_MAX_POINTS")
+
     # --- Bind address ----------------------------------------------------
     live_call_host: str = Field(default="127.0.0.1", alias="LIVE_CALL_HOST")
     live_call_port: int = Field(default=8000, alias="LIVE_CALL_PORT")

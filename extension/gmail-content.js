@@ -87,7 +87,22 @@
     };
   }
 
-  function renderBanner(messageEl, level, lines, detail) {
+  function el(tag, text, style) {
+    const node = document.createElement(tag);
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+    if (style) {
+      Object.assign(node.style, style);
+    }
+    return node;
+  }
+
+  /*
+   * opts: { detail, score?, findings?, footer? }. score is 0-100; findings
+   * carry { message, points, reason }. Everything is set with textContent.
+   */
+  function renderBanner(messageEl, level, opts) {
     const bodyEl = messageEl.querySelector(SELECTORS.body);
     if (!bodyEl || !bodyEl.parentElement) {
       return;
@@ -96,12 +111,11 @@
     if (existing) {
       existing.remove();
     }
+    const findings = opts.findings || [];
+    const hasScore = typeof opts.score === 'number';
 
     const colour = COLOURS[level] || COLOURS.unknown;
-    const banner = document.createElement('div');
-    banner.setAttribute(BANNER_ATTR, level);
-    banner.setAttribute('role', 'status');
-    Object.assign(banner.style, {
+    const banner = el('div', undefined, {
       background: colour.bg,
       border: `1px solid ${colour.border}`,
       borderLeft: `5px solid ${colour.border}`,
@@ -111,47 +125,112 @@
       margin: '8px 0',
       font: '13px/1.4 Arial, sans-serif'
     });
+    banner.setAttribute(BANNER_ATTR, level);
+    banner.setAttribute('role', 'status');
 
-    const title = document.createElement('div');
-    title.style.fontWeight = '700';
+    const header = el('div', undefined, {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'baseline',
+      gap: '12px'
+    });
     // "No signals found" above a list of signals would contradict itself.
-    title.textContent =
-      level === 'low' && lines.length ? 'Minor phishing signals' : TITLES[level] || TITLES.unknown;
-    banner.appendChild(title);
+    header.appendChild(
+      el(
+        'div',
+        level === 'low' && findings.length ? 'Minor phishing signals' : TITLES[level] || TITLES.unknown,
+        { fontWeight: '700' }
+      )
+    );
+    if (hasScore) {
+      header.appendChild(el('div', `Risk score ${opts.score}/100`, { fontWeight: '700', whiteSpace: 'nowrap' }));
+    }
+    banner.appendChild(header);
 
-    const summary = document.createElement('div');
-    summary.textContent = detail;
-    banner.appendChild(summary);
+    if (hasScore) {
+      const track = el('div', undefined, {
+        height: '6px',
+        background: 'rgba(0,0,0,0.12)',
+        borderRadius: '3px',
+        margin: '4px 0 6px'
+      });
+      track.appendChild(
+        el('div', undefined, {
+          height: '100%',
+          width: `${Math.max(0, Math.min(100, opts.score))}%`,
+          background: colour.border,
+          borderRadius: '3px'
+        })
+      );
+      banner.appendChild(track);
+    }
 
-    if (lines.length) {
-      const list = document.createElement('ul');
-      list.style.margin = '4px 0 0 18px';
-      list.style.padding = '0';
-      for (const line of lines) {
-        const item = document.createElement('li');
-        item.textContent = line;
+    banner.appendChild(el('div', opts.detail));
+
+    if (findings.length) {
+      const list = el('ul', undefined, { margin: '6px 0 0 18px', padding: '0' });
+      for (const finding of findings) {
+        const item = el('li', undefined, { marginBottom: '6px' });
+        item.appendChild(el('span', finding.message, { fontWeight: '600' }));
+        item.appendChild(el('span', ` (+${finding.points})`, { fontWeight: '700' }));
+        if (finding.reason) {
+          item.appendChild(
+            el('div', `Why this matters: ${finding.reason}`, { fontSize: '12px', opacity: '0.85' })
+          );
+        }
         list.appendChild(item);
       }
       banner.appendChild(list);
     }
 
+    if (opts.footer) {
+      banner.appendChild(
+        el('div', opts.footer, {
+          fontSize: '11px',
+          opacity: '0.8',
+          marginTop: '4px',
+          borderTop: `1px solid ${colour.border}`,
+          paddingTop: '4px'
+        })
+      );
+    }
+
     bodyEl.parentElement.insertBefore(banner, bodyEl);
+  }
+
+  function scoreFooter(result) {
+    const { medium, high } = result.thresholds || { medium: 25, high: 55 };
+    let text =
+      `How this is scored: each signal adds the points in brackets; ` +
+      `${medium}+ is medium and ${high}+ is high.`;
+    if (result.raw_points > result.score) {
+      text += ` The signals total ${result.raw_points}, capped at 100.`;
+    }
+    const model = result.model;
+    if (model && model.status === 'unavailable') {
+      text += ` The language model was unavailable (${model.detail || 'unknown reason'}), so this is rules only.`;
+    } else if (model && model.id && model.p_phishing !== null && model.p_phishing !== undefined) {
+      text += ` Language model ${model.id} rated the wording ${Math.round(100 * model.p_phishing)}% phishing-like.`;
+    }
+    return `${text} It is a triage score, not a probability of fraud.`;
   }
 
   function showResult(messageEl, outcome) {
     if (!outcome || !outcome.ok) {
-      renderBanner(
-        messageEl,
-        'unknown',
-        [],
-        `Could not check this email: ${(outcome && outcome.error) || 'no response from the extension'}. Start the backend and reopen the message.`
-      );
+      renderBanner(messageEl, 'unknown', {
+        detail: `Could not check this email: ${(outcome && outcome.error) || 'no response from the extension'}. Start the backend and reopen the message.`
+      });
       return;
     }
-    const { level, findings, summary, disclaimer } = outcome.result;
-    const lines = findings.map((f) => f.message);
-    // For a low result the title already says it, so show the caveat instead.
-    renderBanner(messageEl, level, lines, level === 'low' ? disclaimer : summary);
+    const result = outcome.result;
+    const { level, findings, summary, disclaimer } = result;
+    renderBanner(messageEl, level, {
+      // For a low result the title already says it, so show the caveat instead.
+      detail: level === 'low' ? disclaimer : summary,
+      score: level === 'unknown' ? undefined : result.score,
+      findings,
+      footer: findings.length ? scoreFooter(result) : undefined
+    });
   }
 
   async function processMessage(messageEl) {

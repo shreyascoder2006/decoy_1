@@ -14,10 +14,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config import get_settings
-from app.email_check import router as email_router
+from app.email_check import chat_router, router as email_router
 from app.live_call import router as live_call_router
 from app.live_call.session_manager import SessionRegistry, default_client_factory
 from app.logging_config import configure_logging
+from app.voice_check import router as voice_router
 
 logger = logging.getLogger("app")
 
@@ -88,6 +89,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(live_call_router)
     app.include_router(email_router)
+    app.include_router(chat_router)
+    app.include_router(voice_router)
 
     @app.get("/health")
     async def health() -> dict[str, object]:

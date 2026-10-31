@@ -160,6 +160,12 @@ class AlertEvent(BaseModel):
     provisional: bool = True
     session_id: str | None = None
     latency_seconds: float | None = None
+    # Average model confidence (0-100) over the run of synthetic windows that
+    # triggered this alert. The detector's own score, not a calibrated
+    # probability; None when the detector reports no numeric score.
+    risk_score: int | None = None
+    # Plain-language evidence behind the alert, for display next to it.
+    reasons: list[str] = Field(default_factory=list)
 
 
 class ErrorEvent(BaseModel):

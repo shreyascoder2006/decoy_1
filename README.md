@@ -37,6 +37,22 @@ guess, and mock mode must be enabled explicitly.
 
 ---
 
+## Pretrained models
+
+Three pretrained models run in this project (one audio, one text used for both
+Gmail and WhatsApp chat); several others were benchmarked and rejected. **No
+weights are stored in this repository** (GitHub's 100 MB file limit; the models
+are 256-361 MB). They download from Hugging Face on first use, or all at once:
+
+```bash
+cd backend && PYTHONPATH=. ../.venv/bin/python ../scripts/download_models.py
+```
+
+Full list with IDs, sizes, licences (one is undeclared) and benchmark outcomes:
+[docs/MODELS.md](docs/MODELS.md).
+
+---
+
 ## Gmail email check (phishing signals)
 
 Open an email in Gmail and a banner appears above the message body, with the
@@ -48,6 +64,18 @@ specific signals found. High-risk mail also raises a desktop notification.
   credential-request and payment-fraud wording. Rules and weights are in
   `backend/app/email_check/scorer.py`; the score is a capped sum, **not a
   probability**.
+- **Score and reasons:** every banner shows a risk score out of 100, the points
+  each signal contributed, and a plain-language "why this matters" for each. The
+  footer explains the bands (medium from 25, high from 55) and says when the
+  100 cap hides extra points. The notification carries the score and the top reason.
+- **Pretrained model:** a text-classification model (`EMAIL_MODEL_ID`, currently
+  `ptouch/phishing-distilbert-cyber207`) rates the wording and is added as one
+  finding. It is **weak** (about half of phishing caught, ~10% false alarms on
+  tricky legitimate mail, on synthetic samples) and its points are capped below
+  the "high" bar, so it can make an email amber but never red alone. If it
+  fails to load, the rules still run and the banner says so. See
+  [docs/EMAIL_MODEL_BENCHMARK.md](docs/EMAIL_MODEL_BENCHMARK.md). Email only:
+  chat has its own model setting (see "WhatsApp checks").
 - **What it does not do:** it does not decide whether the text was written by
   AI, and a low score never means an email is safe — the banner says "no
   phishing signals found", nothing stronger.
@@ -61,6 +89,33 @@ specific signals found. High-risk mail also raises a desktop notification.
   integration is **not yet run in a real Gmail tab** — Gmail's markup is
   undocumented, and the selectors at the top of `extension/gmail-content.js`
   are the first thing to check if no banner appears.
+
+---
+
+## WhatsApp checks (chat text, voice notes, live calls)
+
+All three show a risk score out of 100 and the reasons behind it, in a banner or
+a toast inside WhatsApp Web, and high-risk results also raise a desktop
+notification.
+
+| What | How it works | When it runs |
+|---|---|---|
+| **Chat text** | Received messages are scored with the same rules as email, plus chat-only rules (prize/easy-money/KYC scams, "Hi Mum, my new number"), plus a **pretrained text model** (`CHAT_MODEL_ID`, currently `ptouch/phishing-distilbert-cyber207`) added as one capped finding. URLs written as plain text are extracted, and `l.wl.co` wrappers are unwrapped. Banner under the message for medium and high. | Automatically, as messages arrive or scroll into view |
+| **Voice notes** | The note's audio is read from the page when you **play** it, decoded to 16 kHz mono, split into ~4 s windows and scored by the local detector. Score = share of analysed windows classified synthetic; high needs a run of 2+ (same rule as calls). | When you play a received voice note |
+| **Live calls** | The existing tab-capture detector. The alert now carries a risk score (mean detector confidence over the run of synthetic windows) and reasons, shown on the page and in the notification. | While Start Protection is running |
+
+- **Privacy:** message text and voice audio go only to your local backend on
+  `127.0.0.1`, through the service worker. Nothing is stored; logs carry counts,
+  levels and rule codes only. Voice notes need the local detector
+  (`LIVE_CALL_PROVIDER=local`).
+- **Honesty:** a low result is worded "no signal found", never "genuine". The
+  voice and call scores are the detector's own, not calibrated probabilities.
+- **Status:** the scoring, endpoints and alert evidence are unit tested (236
+  backend tests). The WhatsApp page code has **not been run in a real WhatsApp
+  Web tab**: its selectors (`div.message-in`, `span.selectable-text`, the
+  `<audio>` blob) are undocumented and the first thing to check if nothing
+  appears. Voice notes through the AI detector have only been validated on
+  ElevenLabs-style audio.
 
 ---
 
@@ -384,9 +439,12 @@ rules require it. The popup carries this disclosure.
 
 ## What this build deliberately does not do
 
-- No WhatsApp DOM scraping, no private WhatsApp JS APIs, no WebRTC internals,
-  no encryption bypass, no call automation. Only the documented
-  `chrome.tabCapture` API.
+- No private WhatsApp JS APIs, no WebRTC internals, no encryption bypass, no
+  call automation. Live calls use only the documented `chrome.tabCapture` API.
+  **Since 0.3.0 the extension does read the WhatsApp Web page**: received
+  message text and links, and the audio of voice notes you play, via a content
+  script (see "WhatsApp checks"). That reverses the earlier "no DOM scraping"
+  rule, so it is stated here rather than left implied.
 - No live-call media through Baileys — that is not something Baileys exposes.
 - No video analysis, no mobile interception, no automatic answering, rejecting,
   recording or blocking.

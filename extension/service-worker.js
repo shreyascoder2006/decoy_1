@@ -128,41 +128,82 @@ async function clearAlertNotification() {
 // Email check (Gmail)
 // ---------------------------------------------------------------------------
 
-const EMAIL_HOST = 'mail.google.com';
-const EMAIL_NOTIFICATION_ID = 'decoy-email-alert';
-const EMAIL_TIMEOUT_MS = 8000;
-const notifiedEmailKeys = new Set();
+// One relay for every page-based check. Each route names the only host allowed
+// to use it, the backend path, the request timeout and the notification text.
+const RELAY_ROUTES = {
+  EMAIL_ANALYZE: {
+    host: 'mail.google.com',
+    path: '/api/email/analyze',
+    timeoutMs: 8000,
+    notificationId: 'decoy-email-alert',
+    title: 'Possible phishing email'
+  },
+  CHAT_ANALYZE: {
+    host: 'web.whatsapp.com',
+    path: '/api/chat/analyze',
+    timeoutMs: 8000,
+    notificationId: 'decoy-chat-alert',
+    title: 'Possible scam message on WhatsApp'
+  },
+  VOICE_ANALYZE: {
+    host: 'web.whatsapp.com',
+    path: '/api/voice/analyze',
+    // The first request may load the model, and a long note has many windows.
+    timeoutMs: 120000,
+    notificationId: 'decoy-voice-alert',
+    title: 'Possible AI-generated voice note'
+  }
+};
+const notifiedKeys = new Set();
+
+function base64ToBytes(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
 
 // The content script cannot call the loopback backend itself (the page's CORS
-// rules apply to it), so the worker relays the request. Only a Gmail tab may
-// ask: a message from anywhere else is ignored.
-async function analyzeEmail(message, sender) {
+// rules apply to it), so the worker relays the request. Each route accepts
+// messages only from its own host; anything else is ignored.
+async function relayAnalysis(message, sender) {
+  const route = RELAY_ROUTES[message.type];
   let senderHost = '';
   try {
     senderHost = new URL(sender && sender.url ? sender.url : '').hostname;
   } catch (error) {
     /* fall through to the rejection below */
   }
-  if (senderHost !== EMAIL_HOST) {
-    return { ok: false, error: 'rejected: not a Gmail tab' };
+  if (!route || senderHost !== route.host) {
+    return { ok: false, error: `rejected: not a ${route ? route.host : 'known'} tab` };
   }
 
+  const isVoice = message.type === 'VOICE_ANALYZE';
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EMAIL_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), route.timeoutMs);
   try {
-    const response = await fetch(`${BACKEND_ORIGIN}/api/email/analyze`, {
+    const response = await fetch(`${BACKEND_ORIGIN}${route.path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(message.payload),
+      headers: { 'Content-Type': isVoice ? 'application/octet-stream' : 'application/json' },
+      body: isVoice ? base64ToBytes(message.pcmBase64) : JSON.stringify(message.payload),
       signal: controller.signal
     });
     if (!response.ok) {
-      return { ok: false, error: `backend returned HTTP ${response.status}` };
+      let detail = '';
+      try {
+        const body = await response.json();
+        detail = typeof body.detail === 'string' ? `: ${body.detail}` : '';
+      } catch (error) {
+        /* no JSON body */
+      }
+      return { ok: false, error: `backend returned HTTP ${response.status}${detail}` };
     }
     const result = await response.json();
-    if (result.level === 'high' && message.key && !notifiedEmailKeys.has(message.key)) {
-      notifiedEmailKeys.add(message.key);
-      await showEmailNotification(result);
+    if (result.level === 'high' && message.key && !notifiedKeys.has(message.key)) {
+      notifiedKeys.add(message.key);
+      await showRelayNotification(route, result);
     }
     return { ok: true, result };
   } catch (error) {
@@ -178,17 +219,38 @@ async function analyzeEmail(message, sender) {
   }
 }
 
-async function showEmailNotification(result) {
+async function showRelayNotification(route, result) {
+  // Email and chat results carry findings; voice results carry reasons.
+  const main = result.findings
+    ? result.findings.length
+      ? result.findings[0].message
+      : result.summary
+    : result.reasons && result.reasons.length
+      ? result.reasons[0]
+      : result.summary;
   try {
-    await chrome.notifications.create(EMAIL_NOTIFICATION_ID, {
+    await chrome.notifications.create(route.notificationId, {
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/alert-128.png'),
-      title: 'Possible phishing email',
-      message: `${result.summary} (${result.findings.length} signals, score ${result.score}/100)`,
+      title: route.title,
+      message: `Risk score ${result.score}/100. Main reason: ${main}`,
       priority: 2
     });
   } catch (error) {
-    console.warn('[sw] email notification failed', error && error.message);
+    console.warn('[sw] notification failed', error && error.message);
+  }
+}
+
+// Show a live-call alert on the page itself. Best effort: in testing mode the
+// captured tab may not be WhatsApp, and then it simply has no listener.
+async function forwardToPage(tabId, message) {
+  if (typeof tabId !== 'number') {
+    return;
+  }
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
+  } catch (error) {
+    /* no content script in that tab */
   }
 }
 
@@ -436,6 +498,7 @@ async function stopProtection() {
   }
 
   const state = await readState();
+  await forwardToPage(state.tabId, { type: 'CALL_CLEAR' });
   if (state.sessionId) {
     // Best effort: release backend state even if the socket already died.
     try {
@@ -492,6 +555,17 @@ async function handleBackendEvent(event) {
       await showAlertNotification(event);
     }
     await setBadge('AI', '#C26B0A');
+    await forwardToPage(state.tabId, {
+      type: 'CALL_ALERT',
+      alert: {
+        title: event.title,
+        message: event.message,
+        code: event.code,
+        provisional: Boolean(event.provisional),
+        riskScore: typeof event.risk_score === 'number' ? event.risk_score : null,
+        reasons: Array.isArray(event.reasons) ? event.reasons : []
+      }
+    });
     await writeState({
       status: STATUS.ALERT,
       alertAt: Date.now(),
@@ -616,9 +690,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // From the Gmail content script
-  if (message.type === 'EMAIL_ANALYZE') {
-    analyzeEmail(message, sender).then(sendResponse);
+  // From the Gmail and WhatsApp content scripts
+  if (RELAY_ROUTES[message.type]) {
+    relayAnalysis(message, sender).then(sendResponse);
     return true;
   }
 

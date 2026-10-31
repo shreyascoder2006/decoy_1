@@ -29,13 +29,32 @@ class EmailAnalyzeRequest(BaseModel):
 
 class Finding(BaseModel):
     code: str
+    # What was found in this specific message (names the evidence).
     message: str
     points: int
+    # Why that kind of signal is suspicious, independent of this message.
+    reason: str = ""
+
+
+class ModelInfo(BaseModel):
+    """What the pretrained text model contributed to this result."""
+
+    id: str | None = None
+    # P(phishing) from the model's own softmax; not a calibrated probability.
+    p_phishing: float | None = None
+    # used | below_threshold | disabled | unavailable
+    status: Literal["used", "below_threshold", "disabled", "unavailable"] = "disabled"
+    detail: str | None = None
 
 
 class EmailAnalyzeResponse(BaseModel):
     score: int
+    # Sum of all rule points before the cap at 100.
+    raw_points: int
     level: Literal["low", "medium", "high", "unknown"]
+    # Lowest score for each level, so the UI can explain the banding.
+    thresholds: dict[str, int]
     findings: list[Finding]
     summary: str
     disclaimer: str
+    model: ModelInfo = Field(default_factory=ModelInfo)

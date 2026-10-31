@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.email_check.schemas import EmailAnalyzeRequest
-from app.email_check.scorer import registrable_domain, score_email
+from app.email_check.scorer import REASONS, registrable_domain, score_email
 from app.main import create_app
 
 
@@ -23,7 +23,7 @@ def codes(request: EmailAnalyzeRequest) -> set[str]:
 
 
 def test_ordinary_mail_is_low_with_no_findings():
-    score, level, findings = score_email(
+    score, level, findings, _ = score_email(
         req(
             sender_name="Priya Sharma",
             sender_email="priya@example.com",
@@ -125,7 +125,7 @@ def test_account_suspension_phrasings(phrase):
 def test_pressure_wording_with_a_genuine_link_stays_below_high():
     # A link that really goes where it says is not a mismatch, so wording
     # alone must not reach "high".
-    score, level, _ = score_email(
+    score, level, _, _ = score_email(
         req(
             subject="Urgent !!! Your account is suspended",
             body="Click this link to complete the payment immediately",
@@ -136,7 +136,7 @@ def test_pressure_wording_with_a_genuine_link_stays_below_high():
 
 
 def test_classic_phish_reaches_high_and_score_is_capped():
-    score, level, findings = score_email(
+    score, level, findings, raw = score_email(
         req(
             sender_name="PayPal Security",
             sender_email="alert@mail-secure.top",
@@ -149,6 +149,49 @@ def test_classic_phish_reaches_high_and_score_is_capped():
     assert level == "high"
     assert score == 100
     assert findings == sorted(findings, key=lambda f: f.points, reverse=True)
+    # The cap hides points: the raw total is what the findings add up to.
+    assert raw == sum(f.points for f in findings)
+    assert raw > score
+
+
+def test_every_finding_explains_why_it_matters():
+    # One email that trips every rule family, so a rule added without a
+    # REASONS entry fails here instead of showing a blank explanation.
+    _, _, findings, _ = score_email(
+        req(
+            sender_name="PayPal billing@paypal.com",
+            sender_email="x@evil.test",
+            subject="Final notice",
+            body="Your account is suspended. Send your password. New bank details attached.",
+            links=[
+                {"text": "https://paypal.com", "href": "http://10.0.0.1/a"},
+                {"text": "b", "href": "https://bit.ly/x"},
+                {"text": "c", "href": "https://xn--pypal-4ve.com/"},
+                {"text": "d", "href": "https://prize.zip/"},
+            ],
+            attachments=["a.pdf.exe", "b.exe", "c.xlsm"],
+        )
+    )
+    # Chat-only rules are covered in test_whatsapp_checks.py.
+    # The model finding is covered in test_email_model.py.
+    chat_only = {"SCAM_OFFER", "FAMILY_IMPERSONATION", "MODEL_PHISHING_TEXT"}
+    assert {f.code for f in findings} == set(REASONS) - chat_only
+    assert all(f.reason and len(f.reason) > 40 for f in findings)
+
+
+def test_endpoint_returns_score_breakdown():
+    body = TestClient(create_app()).post(
+        "/api/email/analyze",
+        json={
+            "sender_name": "PayPal",
+            "sender_email": "a@evil.test",
+            "body": "Verify your account immediately. Enter your password.",
+        },
+    ).json()
+    assert body["thresholds"] == {"medium": 25, "high": 55}
+    assert body["raw_points"] == sum(f["points"] for f in body["findings"])
+    assert body["score"] == min(100, body["raw_points"])
+    assert all(f["reason"] for f in body["findings"])
 
 
 @pytest.mark.parametrize(
