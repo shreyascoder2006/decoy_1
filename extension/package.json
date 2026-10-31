@@ -4,6 +4,6 @@
   "private": true,
   "description": "Chrome MV3 extension that captures WhatsApp Web tab audio and streams PCM to the local detection backend.",
   "scripts": {
-    "test": "node --test tests/audio-dsp.test.js"
+    "test": "node --test tests/audio-dsp.test.js tests/state-store.test.mjs"
   }
 }

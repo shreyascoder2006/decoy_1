@@ -21,6 +21,9 @@ const ui = {
   alertTitle: el('alert-title'),
   alertMessage: el('alert-message'),
   alertQualifier: el('alert-qualifier'),
+  alertScore: el('alert-score'),
+  alertWhy: el('alert-why'),
+  alertReasons: el('alert-reasons'),
   errorBox: el('error-box'),
   errorCode: el('error-code'),
   errorMessage: el('error-message'),
@@ -102,9 +105,26 @@ function render(state) {
     ui.alertBox.hidden = false;
     ui.alertTitle.textContent = state.alertTitle || 'Potential AI-generated voice detected';
     ui.alertMessage.textContent = state.alertMessage || '';
+    // Two analysis windows in a row are required before the first alert, so
+    // "provisional" means the minimum run was met and more audio is still coming.
     ui.alertQualifier.textContent = state.provisional
-      ? 'Provisional: based on the first analysed voice-active window.'
-      : 'Repeated across multiple analysed windows.';
+      ? 'Provisional: two analysis windows in a row were flagged; more audio is still being analysed.'
+      : 'Repeated across several analysed windows.';
+
+    const hasScore = typeof state.alertRiskScore === 'number';
+    ui.alertScore.hidden = !hasScore;
+    if (hasScore) {
+      ui.alertScore.textContent = `Risk score ${state.alertRiskScore}/100 (the detector's own average confidence)`;
+    }
+    const reasons = Array.isArray(state.alertReasons) ? state.alertReasons : [];
+    ui.alertWhy.hidden = reasons.length === 0;
+    ui.alertReasons.replaceChildren(
+      ...reasons.map((text) => {
+        const item = document.createElement('li');
+        item.textContent = text;
+        return item;
+      })
+    );
   } else {
     ui.alertBox.hidden = true;
   }

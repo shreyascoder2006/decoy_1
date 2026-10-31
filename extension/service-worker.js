@@ -15,6 +15,8 @@
  */
 'use strict';
 
+import { createStateStore } from './state-store.js';
+
 const BACKEND_ORIGIN = 'http://127.0.0.1:8000';
 const OFFSCREEN_PATH = 'offscreen.html';
 const WHATSAPP_HOSTS = ['web.whatsapp.com'];
@@ -50,6 +52,8 @@ const DEFAULT_STATE = {
   alertCode: null,
   alertTitle: null,
   alertMessage: null,
+  alertRiskScore: null,
+  alertReasons: [],
   detail: null,
   errorCode: null,
   errorMessage: null,
@@ -64,25 +68,23 @@ const DEFAULT_STATE = {
 // State
 // ---------------------------------------------------------------------------
 
-async function readState() {
-  const stored = await chrome.storage.session.get(STATE_KEY);
-  return { ...DEFAULT_STATE, ...(stored[STATE_KEY] || {}) };
-}
-
-async function writeState(patch) {
-  const next = { ...(await readState()), ...patch };
-  await chrome.storage.session.set({ [STATE_KEY]: next });
+// Updates are serialised (see state-store.js). Backend events, the popup and the
+// Start button all update this state at nearly the same moment, and an update
+// that read the state a moment earlier used to overwrite a newer one, which
+// erased the session id and left Stop Protection greyed out mid-call.
+const stateStore = createStateStore({
+  storage: chrome.storage.session,
+  key: STATE_KEY,
+  defaults: DEFAULT_STATE,
   // The popup may be closed; a failed broadcast is normal.
-  chrome.runtime.sendMessage({ target: 'popup', type: 'STATE', state: next }).catch(() => {});
-  return next;
-}
+  onChange: (state) => {
+    chrome.runtime.sendMessage({ target: 'popup', type: 'STATE', state }).catch(() => {});
+  }
+});
 
-async function resetState() {
-  await chrome.storage.session.set({ [STATE_KEY]: { ...DEFAULT_STATE } });
-  chrome.runtime
-    .sendMessage({ target: 'popup', type: 'STATE', state: { ...DEFAULT_STATE } })
-    .catch(() => {});
-}
+const readState = () => stateStore.read();
+const writeState = (patch) => stateStore.write(patch);
+const resetState = () => stateStore.reset();
 
 // ---------------------------------------------------------------------------
 // Badge and notifications
@@ -572,6 +574,8 @@ async function handleBackendEvent(event) {
       alertCode: event.code,
       alertTitle: event.title,
       alertMessage: event.message,
+      alertRiskScore: typeof event.risk_score === 'number' ? event.risk_score : null,
+      alertReasons: Array.isArray(event.reasons) ? event.reasons : [],
       provisional: Boolean(event.provisional),
       alertLatencySeconds:
         event.latency_seconds === undefined ? null : event.latency_seconds
