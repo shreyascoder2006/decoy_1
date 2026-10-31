@@ -30,7 +30,9 @@ const state = {
   muteGain: null,
   socket: null,
   running: false,
+  detectorReady: false,
   framesSent: 0,
+  framesHeldBeforeReady: 0,
   bytesSent: 0,
   speechSignalled: false,
   inputSampleRate: null
@@ -157,6 +159,24 @@ function sendAudio(buffer) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return;
   }
+
+  // Hold audio until the backend says the detector is ready.
+  //
+  // The backend opens its detector during the handshake and does not read
+  // the socket until that finishes. On a first run that includes downloading
+  // a model of over a gigabyte, so without this gate we would push minutes of
+  // PCM into a socket nobody is reading: the frames pile up in the send
+  // buffer and the backend then has a long backlog of stale audio to chew
+  // through before it ever sees anything live. Discarding pre-ready audio is
+  // also correct for the latency measurement, which starts at the first
+  // frame the backend actually receives.
+  if (!state.detectorReady) {
+    state.framesHeldBeforeReady += 1;
+    if (state.framesHeldBeforeReady === 1) {
+      report({ type: 'WAITING_FOR_DETECTOR' });
+    }
+    return;
+  }
   // Drop rather than queue without bound if the socket is congested.
   // 10 frames == 1 s of audio; beyond that the relay is not keeping up.
   if (socket.bufferedAmount > 10 * TARGET_SAMPLE_RATE * 0.1 * 2) {
@@ -209,6 +229,14 @@ function openBackendSocket(websocketUrl) {
         log('discarding a non-JSON backend frame');
         return;
       }
+      if (payload && payload.type === 'status' && payload.status === 'ready') {
+        if (!state.detectorReady) {
+          state.detectorReady = true;
+          log('detector ready; starting to stream audio', {
+            framesHeldBeforeReady: state.framesHeldBeforeReady
+          });
+        }
+      }
       report({ type: 'BACKEND_EVENT', event: payload });
     };
 
@@ -232,7 +260,9 @@ async function start(request) {
   }
 
   state.sessionId = request.sessionId;
+  state.detectorReady = false;
   state.framesSent = 0;
+  state.framesHeldBeforeReady = 0;
   state.bytesSent = 0;
   state.speechSignalled = false;
 
@@ -360,6 +390,7 @@ async function teardown(reason) {
 
   const summary = {
     framesSent: state.framesSent,
+    framesHeldBeforeReady: state.framesHeldBeforeReady,
     bytesSent: state.bytesSent,
     sessionId: state.sessionId
   };
@@ -372,6 +403,7 @@ async function teardown(reason) {
   state.muteGain = null;
   state.socket = null;
   state.sessionId = null;
+  state.detectorReady = false;
 
   if (wasRunning) {
     report({ type: 'CAPTURE_STOPPED', reason, ...summary });
@@ -402,7 +434,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({
       ok: true,
       running: state.running,
+      detectorReady: state.detectorReady,
       framesSent: state.framesSent,
+      framesHeldBeforeReady: state.framesHeldBeforeReady,
       bytesSent: state.bytesSent,
       inputSampleRate: state.inputSampleRate,
       sessionId: state.sessionId

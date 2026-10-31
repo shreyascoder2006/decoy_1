@@ -118,12 +118,27 @@ You want `"provider":"local"` and `"mock_mode":false`. If `mock_mode` is
 > running. Go back to the first window and check it is still showing the
 > uvicorn log.
 
-### Pre-download the model
+### Pre-download the model — do this before anything else
 
 The detection model is **~1.3 GB** and downloads on the **first analysis
-session**, not at startup — so the server will appear healthy and then stall
-for minutes the first time you actually analyse something. Trigger it now,
-not during your demo:
+session**, not at startup, so a healthy-looking server can still stall for
+minutes the first time you analyse something. Warm the cache now, in your
+second PowerShell window:
+
+```powershell
+cd C:\Users\Shreyas\Documents\decoy_1
+```
+
+```powershell
+.\.venv\Scripts\python.exe -c "from transformers import AutoFeatureExtractor, AutoModelForAudioClassification; m='Gustking/wav2vec2-large-xlsr-deepfake-audio-classification'; AutoFeatureExtractor.from_pretrained(m); AutoModelForAudioClassification.from_pretrained(m); print('model cached')"
+```
+
+Wait for `model cached`. It is a one-off; afterwards the model loads from
+disk in about 2 seconds. The extension holds audio until the detector
+reports ready, so nothing is lost if you skip this — you just wait longer
+with the popup showing "Starting".
+
+You can also trigger it through the stack with a WAV file:
 
 ```powershell
 cd backend

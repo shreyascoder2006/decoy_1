@@ -546,6 +546,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     );
     return true;
   }
+  if (message.type === 'WAITING_FOR_DETECTOR') {
+    writeState({
+      detail:
+        'Waiting for the detector to load. The first run downloads the model ' +
+        '(over 1 GB) and can take several minutes; audio is held until it is ready.'
+    }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
   if (message.type === 'TRANSPORT_LAG') {
     writeState({ detail: 'Audio is being dropped: the relay is not keeping up.' }).then(
       () => sendResponse({ ok: true })
