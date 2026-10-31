@@ -40,12 +40,17 @@ class Settings(BaseSettings):
     # Runs in-process: no credential, no credits, no network at call time.
     live_call_local_model_id: str = Field(
         # Chosen by measurement against ElevenLabs output and a real
-        # WhatsApp-codec human sample: AUC 1.000, clean separation
-        # (human 0.06-0.12, AI 0.78-0.91). The previous default scored
-        # AUC 0.009 on the same data -- almost perfectly inverted -- while
-        # ranking BEST on VITS. Detector choice does not transfer between
-        # TTS engines; see docs/DETECTOR_BENCHMARK.md before changing this.
-        default="Gustking/wav2vec2-large-xlsr-deepfake-audio-classification",
+        # WhatsApp-codec human sample: AUC 1.000 with a very wide margin
+        # (human 0.0006-0.0011, AI 0.78-0.999), and 378 MB rather than the
+        # 1.26 GB of the large model that scored the same AUC.
+        #
+        # Of 11 community models measured on that data, 8 were INVERTED --
+        # they scored AI speech lower than human speech. One scored AUC
+        # 0.922 with every value inside a 0.013-wide band, so it had perfect
+        # ordering and no usable threshold. Detector choice does not transfer
+        # between TTS engines: see docs/DETECTOR_BENCHMARK.md and re-run
+        # scripts/benchmark_detectors.py before changing this.
+        default="Shahzaib-Arshad/deepfake_audio_detection",
         alias="LIVE_CALL_LOCAL_MODEL_ID",
     )
     live_call_local_device: str = Field(default="cpu", alias="LIVE_CALL_LOCAL_DEVICE")

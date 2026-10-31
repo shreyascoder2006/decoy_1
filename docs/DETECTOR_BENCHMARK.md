@@ -2,34 +2,51 @@
 
 **Date:** 2026-10-31 · **Reproduce:** `python scripts/benchmark_detectors.py --human-dir <dir> --fake-dir <dir>`
 
-## The headline finding
+## The headline findings
 
-**Detector choice does not transfer between TTS engines, and the wrong model is
-actively inverted rather than merely weak.**
+**1. Detector choice does not transfer between TTS engines, and the wrong
+model is actively inverted rather than merely weak.**
 
-The same five models, ranked on two different datasets:
+Of **11 community models** measured against ElevenLabs output and a genuine
+WhatsApp-codec human sample, **8 were inverted** — they scored AI speech
+*lower* than human speech. The ranking against VITS was almost the reverse of
+the ranking against ElevenLabs:
 
-| Model | AUC vs **VITS** | AUC vs **ElevenLabs** |
+| Model | AUC vs VITS | AUC vs ElevenLabs |
 |---|---|---|
-| `Gustking/wav2vec2-large-xlsr-deepfake-audio-classification` | 0.394 (inverted) | **1.000 (perfect)** |
-| `Om-Parab/distilhubert-...-in-the-wild` | 0.264 | 0.783 |
-| `MelodyMachine/Deepfake-audio-detection-V2` | 0.007 | 0.313 |
-| `mo-thecreator/Deepfake-audio-detection` | 0.121 | 0.217 |
+| `Gustking/wav2vec2-large-xlsr-...` | 0.394 (inverted) | 1.000 |
 | `Hemgg/Deepfake-audio-detection` | **0.889 (best)** | **0.009 (worst)** |
 
-The ranking is almost exactly reversed. The model that was best on VITS is
-worst on ElevenLabs, and vice versa.
+`Hemgg` labelled **4 of 5 windows of genuine human speech** as synthetic and
+flagged **0 of 23 ElevenLabs windows**. A demo built on it would have called
+the human a deepfake and the deepfake human.
 
-Concretely, `Hemgg` against ElevenLabs output and a real human voice note:
+**2. A high AUC does not mean a usable model.**
 
-* labelled **4 of 5 windows of genuine human speech** as synthetic
-* flagged **0 of 23 ElevenLabs windows**
+`WWWxp/wav2vec2_spoof_dection1` scored **AUC 0.922** — but every score, AI and
+human alike, fell between 0.479 and 0.492. Perfect ordering, a 0.013-wide
+band, and nowhere to put a threshold. AUC measures *ordering*;
+what a live detector needs is separated *clusters*.
 
-A demo built on it would have called the human a deepfake and the deepfake
-human. This is why `scripts/benchmark_detectors.py` exists and why the
-`.env.example` comment tells you to run it against the engine you expect to
-face. **Do not pick one of these models by reputation, download count, or
-this table.**
+`scripts/benchmark_detectors.py` therefore reports the **margin** (lowest AI
+score minus highest human score), ranks by it rather than by AUC, and flags
+anything under 0.2 as `NO-MARGIN`.
+
+## The chosen model
+
+`Shahzaib-Arshad/deepfake_audio_detection` — 378 MB, Apache-licensed
+wav2vec2-base fine-tune.
+
+| | your voice (WhatsApp codec) | ElevenLabs |
+|---|---|---|
+| p_fake range | **0.0006 – 0.0011** | **0.784 – 0.999** |
+| @ threshold 0.5 | 0/6 flagged | **24/24 flagged** |
+
+Margin **+0.995**. It was preferred over `Gustking/wav2vec2-large-xlsr-...`,
+which scored the same AUC 1.000, because it is **378 MB instead of 1262 MB**
+with a wider margin (Gustking: human 0.064–0.121, AI 0.784–0.907).
+
+---
 
 ---
 
@@ -137,24 +154,20 @@ shorter, noisier windows.
 ## End-to-end verification
 
 Full stack at 1× real time — HTTP session, WebSocket, local model, windowing,
-alert policy — via `scripts/detect_file.py`, using the chosen model and the
-real samples:
+alert policy — via `scripts/detect_file.py` with the chosen model:
 
-| | ElevenLabs (94.6 s) | Human voice note (24.0 s) |
+| | ElevenLabs (94.6 s) | Your voice note (24.0 s) |
 |---|---|---|
-| Windows analysed | 20 | 6 |
-| Labelled fake | **20/20** | **0/6** |
-| p_fake range | 0.760 – 0.912 | 0.064 – 0.122 |
+| Windows analysed | 24 | 6 |
+| Labelled fake | **24/24** | **0/6** |
+| p_fake range | 0.784 – 0.999 (mean 0.980) | 0.0006 – 0.0011 |
 | **Alerts raised** | **2** (warn + upgrade) | **0** |
-| Alert latency from first speech | **8.52 s** | n/a |
+| Alert latency from first speech | **8.15 s** | n/a |
 | Final label | `fake` | `real` |
-| Frames received / dropped | 752 / **0** | 239 / **0** |
+| Frames received / dropped | 945 / **0** | 239 / **0** |
 
-Model load 2.3 s once per process. Windows complete 3.6–4.2 s apart against a
-4 s cadence, so inference tracks real time with margin on 4 CPU threads even
-for this 315 M-parameter model. An artificial `--fast` flood does trip
-backpressure, which is expected and reported as a transport error rather than
-a detection failure.
+Model load 2.2 s once per process, zero dropped frames, windows completing
+inside the 4 s cadence on 4 CPU threads.
 
 ## Earlier result on dataset A (kept for the transfer comparison)
 
@@ -171,11 +184,16 @@ consecutive-run requirement suppressed it, so no alert reached the user.
 
 ## Limitations — read before trusting any of this
 
-1. **The ElevenLabs result rests on one voice and one recording.** 23 AI
-   windows from a single preset ("Dramatic Powerful and Epic") against 5–6
-   human windows from one speaker. AUC 1.000 over ~120 pairs is encouraging,
+1. **The ElevenLabs result rests on one voice and one recording.** 24 AI
+   windows from a single preset ("Dramatic Powerful and Epic") against 6
+   human windows from one speaker. AUC 1.000 over ~144 pairs is encouraging,
    not a precise accuracy figure, and a dramatic/stylised preset may be easier
    to detect than a neutral conversational clone.
+2. **The chosen model's human scores are ~0.001 — suspiciously confident.**
+   That usually means the input is far from anything in its training
+   distribution, and such models can be brittle on audio that merely
+   *resembles* what they were trained on. The wide margin is the reason to
+   expect it to survive a codec, not proof that it will.
 2. **Only the human side has been through WhatsApp.** The voice note carries
    real Opus compression; the ElevenLabs sample is a clean MP3. A live call
    will degrade the AI side too, and that is the single largest remaining

@@ -23,8 +23,8 @@ are available as alternatives behind the same interface.
 | Backend relay, session lifecycle, alert policy | Implemented, 194 automated tests passing |
 | PCM capture maths (downmix, resample, s16le, framing) | Implemented, 28 automated tests passing |
 | Real-time streaming over a live WebSocket | **Verified** against a running uvicorn |
-| **Local detector flagging real ElevenLabs audio** | **Verified end to end.** 20/20 AI windows flagged, alert in 8.52 s; a real WhatsApp voice note → 0/6 flagged, no alert |
-| Detector model selection | **Measured against ElevenLabs specifically.** The ranking *reversed* between TTS engines — see [docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md) |
+| **Local detector flagging real ElevenLabs audio** | **Verified end to end.** 24/24 AI windows flagged, alert in 8.15 s; a real WhatsApp voice note → 0/6 flagged, no alert |
+| Detector model selection | **11 models measured against ElevenLabs; 8 were inverted.** The ranking *reversed* between TTS engines — see [docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md) |
 | Chrome extension code (capture, playback, UI, notifications) | Implemented; **not executed** — no Chrome or display in the build environment |
 | Hosted provider (Resemble) verdict | **Not verified** — no API key. The endpoint was reached and returned HTTP 401 for a dummy key, so the URL, `extra_params` encoding and Bearer auth path are exercised; only a credential is missing |
 | Latency on a real WhatsApp call | **Not measured** — needs two accounts and Chrome |
@@ -199,7 +199,7 @@ All of these live in `backend/.env`. Never commit it; `.gitignore` excludes it.
 | `RESEMBLE_API_KEY` | *(empty)* | Provider credential. **Server-side only.** |
 | `RESEMBLE_STREAM_URL` | `wss://stream.resemble.ai/api/v1/detect/audio` | Upstream streaming endpoint |
 | `LIVE_CALL_PROVIDER` | `local` | `local`, `resemble` or `mock` |
-| `LIVE_CALL_LOCAL_MODEL_ID` | `Gustking/wav2vec2-large-xlsr-...` | Chosen by measurement against ElevenLabs — **re-measure for your engine** |
+| `LIVE_CALL_LOCAL_MODEL_ID` | `Shahzaib-Arshad/deepfake_audio_detection` | 378 MB. Chosen by measurement against ElevenLabs — **re-measure for your engine** |
 | `LIVE_CALL_LOCAL_FAKE_THRESHOLD` | `0.5` | Decision threshold on P(fake). Sits in the empty band between measured clusters |
 | `LIVE_CALL_LOCAL_WINDOW_SECONDS` | `4.0` | Analysis window. Lower for faster alerts, noisier windows |
 | `LIVE_CALL_LOCAL_MIN_RMS` | `0.005` | Voice-activity floor; quieter windows are skipped, never labelled |
@@ -321,8 +321,8 @@ noisier windows.
 Measured end to end at 1× real time with the real samples:
 
 ```text
-ElevenLabs AI    first verdict 4.90 s   first alert 8.52 s   upgrade 16.4 s
-Human voice note first verdict 4.48 s   no alert raised
+ElevenLabs AI    first verdict 4.25 s   first alert 8.15 s   upgrade 16.3 s
+Human voice note first verdict 4.13 s   no alert raised
 ```
 
 Both runs dropped zero frames, and analysis windows complete 3.6–4.2 s apart

@@ -42,6 +42,9 @@ DEFAULT_MODELS = [
 WINDOW_SECONDS = 4.0
 SAMPLE_RATE = 16000
 
+# A usable model needs separated score CLUSTERS, not merely correct ordering.
+MIN_USABLE_MARGIN = 0.2
+
 
 def read_window(path: pathlib.Path, seconds: float) -> list[float] | None:
     """Read the first `seconds` of a 16 kHz mono 16-bit WAV as floats."""
@@ -118,11 +121,11 @@ def main(argv: list[str]) -> int:
             engine = ModelEngine.load(model_id, "cpu")
         except DetectorUnavailable as exc:
             print(f"  UNUSABLE: {exc}\n")
-            summary.append((model_id, None, None, None, str(exc)))
+            summary.append((model_id, None, None, None, str(exc), 0.0))
             continue
         except Exception as exc:  # noqa: BLE001
             print(f"  LOAD FAILED: {type(exc).__name__}: {exc}\n")
-            summary.append((model_id, None, None, None, type(exc).__name__))
+            summary.append((model_id, None, None, None, type(exc).__name__, 0.0))
             continue
 
         print(f"  labels: {({int(k): v for k, v in sorted(engine.label_map.items())})}")
@@ -141,6 +144,17 @@ def main(argv: list[str]) -> int:
         separation = auc(fake_scores, human_scores)
         print(f"  AUC (1.0 perfect, 0.5 coin flip, <0.5 inverted): {separation:.3f}")
 
+        # AUC measures ORDERING only. A model can rank every AI clip above
+        # every human clip while squeezing all scores into a band too narrow
+        # to place a threshold in -- one measured model scored AUC 0.922 with
+        # every value between 0.479 and 0.492. Report the usable margin too.
+        margin = min(fake_scores) - max(human_scores)
+        print(f"  margin (lowest AI score - highest human score): {margin:+.3f}")
+        if margin <= 0:
+            print("    the two classes overlap; no threshold separates them cleanly")
+        elif margin < MIN_USABLE_MARGIN:
+            print(f"    below {MIN_USABLE_MARGIN}: too narrow to survive codec or noise shifts")
+
         best = None
         for threshold in thresholds:
             detected = sum(1 for s in fake_scores if s >= threshold)
@@ -149,7 +163,13 @@ def main(argv: list[str]) -> int:
                   f"   false alarms {false_alarms}/{len(human_scores)}")
             if best is None:
                 best = (threshold, detected, false_alarms)
-        summary.append((model_id, separation, best, len(fake_scores), None))
+
+        # Recommend the midpoint of the empty band when there is one.
+        if margin > 0:
+            suggested = round((max(human_scores) + min(fake_scores)) / 2, 2)
+            print(f"  suggested LIVE_CALL_LOCAL_FAKE_THRESHOLD: {suggested}")
+
+        summary.append((model_id, separation, best, len(fake_scores), None, margin))
         print()
 
     # --- verdict ----------------------------------------------------------
@@ -157,29 +177,36 @@ def main(argv: list[str]) -> int:
     print("SUMMARY (ranked by separation)")
     print("=" * 76)
     usable = [s for s in summary if s[1] is not None and s[1] == s[1]]
-    usable.sort(key=lambda s: s[1], reverse=True)
-    for model_id, separation, best, total, _ in usable:
+    # Rank by margin, then AUC: a model you cannot place a threshold in is of
+    # no use however well it orders the data.
+    usable.sort(key=lambda s: (s[5], s[1]), reverse=True)
+    for model_id, separation, best, total, _, margin in usable:
         threshold, detected, false_alarms = best
-        verdict = (
-            "USABLE" if separation >= 0.9
-            else "WEAK" if separation >= 0.7
-            else "INVERTED" if separation < 0.5
-            else "POOR"
-        )
-        print(f"  {verdict:<9} AUC={separation:.3f}  {model_id}")
+        if separation < 0.5:
+            verdict = "INVERTED"
+        elif margin < MIN_USABLE_MARGIN:
+            verdict = "NO-MARGIN"
+        elif separation >= 0.95:
+            verdict = "USABLE"
+        elif separation >= 0.7:
+            verdict = "WEAK"
+        else:
+            verdict = "POOR"
+        print(f"  {verdict:<9} AUC={separation:.3f} margin={margin:+.3f}  {model_id}")
         print(f"            at threshold {threshold}: {detected}/{total} detected, "
               f"{false_alarms} false alarms")
-    for model_id, separation, _, _, reason in summary:
+    for model_id, separation, _, _, reason, _m in summary:
         if separation is None:
             print(f"  UNUSABLE  {model_id}  ({reason})")
 
     if not usable:
         print("\nNo model could be scored.")
         return 1
-    if usable[0][1] < 0.7:
+    if usable[0][5] < MIN_USABLE_MARGIN or usable[0][1] < 0.7:
         print("\nNo model separated these samples well enough to demo. Do not ship a")
-        print("verdict from any of them on this data. Try more/different samples, or")
-        print("a different model family.")
+        print("verdict from any of them on this data. A high AUC with a small margin")
+        print("means correct ordering but no usable threshold. Try more/different")
+        print("samples, or a different model family.")
         return 2
     print(f"\nBest on this data: {usable[0][0]}")
     print("Set it with LIVE_CALL_LOCAL_MODEL_ID, and tune")
