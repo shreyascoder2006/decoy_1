@@ -2,14 +2,38 @@
 
 **Date:** 2026-10-31 · **Reproduce:** `python scripts/benchmark_detectors.py --human-dir <dir> --fake-dir <dir>`
 
-The short version: **four of the five most-downloaded community audio-deepfake
-models are inverted on neural TTS.** They score AI-generated speech *lower*
-than genuine human speech. Picking by download count would have produced a
-demo that confidently labels humans as AI and AI as human.
+## The headline finding
+
+**Detector choice does not transfer between TTS engines, and the wrong model is
+actively inverted rather than merely weak.**
+
+The same five models, ranked on two different datasets:
+
+| Model | AUC vs **VITS** | AUC vs **ElevenLabs** |
+|---|---|---|
+| `Gustking/wav2vec2-large-xlsr-deepfake-audio-classification` | 0.394 (inverted) | **1.000 (perfect)** |
+| `Om-Parab/distilhubert-...-in-the-wild` | 0.264 | 0.783 |
+| `MelodyMachine/Deepfake-audio-detection-V2` | 0.007 | 0.313 |
+| `mo-thecreator/Deepfake-audio-detection` | 0.121 | 0.217 |
+| `Hemgg/Deepfake-audio-detection` | **0.889 (best)** | **0.009 (worst)** |
+
+The ranking is almost exactly reversed. The model that was best on VITS is
+worst on ElevenLabs, and vice versa.
+
+Concretely, `Hemgg` against ElevenLabs output and a real human voice note:
+
+* labelled **4 of 5 windows of genuine human speech** as synthetic
+* flagged **0 of 23 ElevenLabs windows**
+
+A demo built on it would have called the human a deepfake and the deepfake
+human. This is why `scripts/benchmark_detectors.py` exists and why the
+`.env.example` comment tells you to run it against the engine you expect to
+face. **Do not pick one of these models by reputation, download count, or
+this table.**
 
 ---
 
-## Method
+## Dataset A — VITS vs LibriSpeech
 
 | | |
 |---|---|
@@ -39,7 +63,41 @@ one phrasing style.
 project's first default. At AUC 0.121 it is worse than a coin flip — it was
 replaced on the strength of this measurement, not on reputation.
 
-### Threshold sweep for the chosen model
+### Dataset B — ElevenLabs vs a real WhatsApp voice note
+
+The decisive test, because it uses the actual engine to be demonstrated and a
+human sample that has **already been through WhatsApp's Opus codec**.
+
+| | |
+|---|---|
+| AI | ElevenLabs ("Viraj – Dramatic Powerful and Epic" preset), 94.6 s → 23 windows |
+| Human | WhatsApp voice note (`.opus`, 48 kHz → 16 kHz), 24.0 s → 5–6 windows |
+
+Chosen model, `Gustking/wav2vec2-large-xlsr-deepfake-audio-classification`:
+
+| | p_fake range | mean |
+|---|---|---|
+| Human voice note | **0.064 – 0.121** | 0.084 |
+| ElevenLabs | **0.784 – 0.907** | 0.876 |
+
+| Threshold | AI detected | Human false alarms |
+|---|---|---|
+| **0.5** | **23/23 (100%)** | **0/5** |
+| 0.7 | 23/23 (100%) | 0/5 |
+| 0.9 | 5/23 | 0/5 |
+
+**0.5 is the default.** The two clusters are separated by an empty band from
+0.121 to 0.784, so 0.5 sits in the middle with large margin on both sides —
+room for codec degradation to shift scores without flipping a verdict.
+
+Note this model declares `{0: real, 1: fake}`, the **opposite** order to three
+of the others. The label map is read from the model's own `id2label`
+(`label_vocab.py`); hardcoding "index 0 means fake" would have made this model
+silently backwards.
+
+---
+
+### Threshold sweep on dataset A (for the model that won there)
 
 | Threshold | Detections | False alarms | Per-window FA rate |
 |---|---|---|---|
@@ -79,47 +137,68 @@ shorter, noisier windows.
 ## End-to-end verification
 
 Full stack at 1× real time — HTTP session, WebSocket, local model, windowing,
-alert policy — via `scripts/detect_file.py`:
+alert policy — via `scripts/detect_file.py`, using the chosen model and the
+real samples:
+
+| | ElevenLabs (94.6 s) | Human voice note (24.0 s) |
+|---|---|---|
+| Windows analysed | 20 | 6 |
+| Labelled fake | **20/20** | **0/6** |
+| p_fake range | 0.760 – 0.912 | 0.064 – 0.122 |
+| **Alerts raised** | **2** (warn + upgrade) | **0** |
+| Alert latency from first speech | **8.52 s** | n/a |
+| Final label | `fake` | `real` |
+| Frames received / dropped | 752 / **0** | 239 / **0** |
+
+Model load 2.3 s once per process. Windows complete 3.6–4.2 s apart against a
+4 s cadence, so inference tracks real time with margin on 4 CPU threads even
+for this 315 M-parameter model. An artificial `--fast` flood does trip
+backpressure, which is expected and reported as a transport error rather than
+a detection failure.
+
+## Earlier result on dataset A (kept for the transfer comparison)
+
+Against VITS, with the model that won *there* (`Hemgg`) at threshold 0.9:
 
 | | AI call (36.9 s) | Human call (40.0 s) |
 |---|---|---|
-| Windows analysed | 9 | 10 |
 | Labelled fake | 7/9 | 1/10 |
-| **Alerts raised** | **2** (warn + upgrade) | **0** |
-| Alert latency from first speech | **8.13 s** | n/a |
-| Final label | `fake` | `real` |
-| Frames dropped | 0 | 0 |
+| Alerts raised | 2 | **0** |
+| Alert latency | 8.13 s | n/a |
 
-The human call is the important row. One window *was* falsely labelled fake,
-and the consecutive-run requirement suppressed it — no alert reached the user.
-Without that rule this run would have produced a false "Potential
-AI-generated voice detected" on genuine human speech.
-
-Model load takes ~2.1 s once per process. Inference keeps up comfortably at
-real time on 4 CPU threads (0 dropped frames in both runs).
-
----
+The human row is instructive: one window *was* falsely labelled fake and the
+consecutive-run requirement suppressed it, so no alert reached the user.
 
 ## Limitations — read before trusting any of this
 
-1. **One TTS family.** All AI samples came from VITS (`mms-tts-eng`). Nothing
-   here predicts behaviour on ElevenLabs, PlayHT, Cartesia, OpenAI TTS, or a
-   voice clone of a specific person. Those are what a real attacker uses.
-   **Benchmark your own samples before relying on a verdict.**
-2. **One human corpus.** LibriSpeech is clean read speech from audiobooks:
-   quiet, close-miked, native-accented. Real calls are noisy, compressed and
-   accented. The 10% false-alarm rate may be optimistic or pessimistic.
-3. **No WhatsApp codec in the loop.** These are clean 16 kHz WAVs. A live call
-   adds Opus compression, noise suppression and packet loss. Re-measure
-   through the real call path before quoting any number.
-4. **40 + 20 is a small sample.** AUC 0.889 over 800 pairs has a wide
-   confidence interval. Treat it as "this model has signal and the others do
-   not", not as a precise accuracy figure.
-5. **Concatenation artefacts.** The end-to-end samples were built by
-   concatenating 5–7 s clips, so some windows straddle a join. This may
-   account for a few of the misses.
-
----
+1. **The ElevenLabs result rests on one voice and one recording.** 23 AI
+   windows from a single preset ("Dramatic Powerful and Epic") against 5–6
+   human windows from one speaker. AUC 1.000 over ~120 pairs is encouraging,
+   not a precise accuracy figure, and a dramatic/stylised preset may be easier
+   to detect than a neutral conversational clone.
+2. **Only the human side has been through WhatsApp.** The voice note carries
+   real Opus compression; the ElevenLabs sample is a clean MP3. A live call
+   will degrade the AI side too, and that is the single largest remaining
+   unknown. The 0.121→0.784 gap is wide, which is the reason to expect it to
+   survive, not evidence that it does.
+3. **One human speaker.** 0 false alarms out of 5–6 windows is weak evidence
+   for a low false-alarm rate; the upper confidence bound is high. This is why
+   `LIVE_CALL_ALERT_MIN_FAKE_WINDOWS` stays at 2. Collect more genuine
+   samples, and if false alarms remain at zero, dropping it to 1 halves the
+   alert latency to about 4 s.
+4. **Nothing here predicts other engines.** PlayHT, Cartesia, OpenAI TTS and
+   a targeted voice clone are all untested. Given how completely the ranking
+   flipped between VITS and ElevenLabs, assume nothing transfers.
+5. **Dataset A's human corpus is not a phone call.** LibriSpeech is clean,
+   close-miked audiobook speech.
+6. **A stronger model family exists but is not drop-in.** The
+   `SpeechAntiSpoofingBenchmarks/*-AntiDeepfake` models (NII Yamagishi Lab,
+   [arXiv:2506.21090](https://arxiv.org/abs/2506.21090), reported EER
+   0.57–0.92%) are research-grade. They are **CC BY-NC-SA 4.0
+   (non-commercial)**, expose no `id2label`, register as
+   `Wav2Vec2ForPreTraining` with a custom pooling head whose score is the
+   *real* logit, and their authors prohibit evaluation on LibriTTS- and
+   MLS-derived corpora. Integrating one needs a separate adapter.
 
 ## Re-running this with your own samples
 

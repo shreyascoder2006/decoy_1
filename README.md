@@ -23,12 +23,13 @@ are available as alternatives behind the same interface.
 | Backend relay, session lifecycle, alert policy | Implemented, 194 automated tests passing |
 | PCM capture maths (downmix, resample, s16le, framing) | Implemented, 28 automated tests passing |
 | Real-time streaming over a live WebSocket | **Verified** against a running uvicorn |
-| **Local detector actually flagging AI speech** | **Verified end to end.** AI call → alert in 8.13 s; genuine human call → no alert. See [docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md) |
-| Detector model selection | **Measured, not assumed.** 4 of 5 popular models were *inverted* on neural TTS |
+| **Local detector flagging real ElevenLabs audio** | **Verified end to end.** 20/20 AI windows flagged, alert in 8.52 s; a real WhatsApp voice note → 0/6 flagged, no alert |
+| Detector model selection | **Measured against ElevenLabs specifically.** The ranking *reversed* between TTS engines — see [docs/DETECTOR_BENCHMARK.md](docs/DETECTOR_BENCHMARK.md) |
 | Chrome extension code (capture, playback, UI, notifications) | Implemented; **not executed** — no Chrome or display in the build environment |
 | Hosted provider (Resemble) verdict | **Not verified** — no API key. The endpoint was reached and returned HTTP 401 for a dummy key, so the URL, `extra_params` encoding and Bearer auth path are exercised; only a credential is missing |
 | Latency on a real WhatsApp call | **Not measured** — needs two accounts and Chrome |
-| Accuracy against commercial TTS / voice clones | **Not measured.** Validated against VITS only |
+| Accuracy on other engines (PlayHT, Cartesia, OpenAI TTS, targeted clones) | **Not measured.** Assume nothing transfers |
+| AI audio *through* a live WhatsApp call | **Not measured** — the human side has real Opus codec, the AI side does not |
 
 Nothing in this repository fabricates a detection verdict. With no working
 detector the system reports `DETECTOR_UNAVAILABLE`; it never falls back to a
@@ -198,8 +199,8 @@ All of these live in `backend/.env`. Never commit it; `.gitignore` excludes it.
 | `RESEMBLE_API_KEY` | *(empty)* | Provider credential. **Server-side only.** |
 | `RESEMBLE_STREAM_URL` | `wss://stream.resemble.ai/api/v1/detect/audio` | Upstream streaming endpoint |
 | `LIVE_CALL_PROVIDER` | `local` | `local`, `resemble` or `mock` |
-| `LIVE_CALL_LOCAL_MODEL_ID` | `Hemgg/Deepfake-audio-detection` | Chosen by measurement — see the benchmark doc |
-| `LIVE_CALL_LOCAL_FAKE_THRESHOLD` | `0.9` | Decision threshold on P(fake). Tune on your own samples |
+| `LIVE_CALL_LOCAL_MODEL_ID` | `Gustking/wav2vec2-large-xlsr-...` | Chosen by measurement against ElevenLabs — **re-measure for your engine** |
+| `LIVE_CALL_LOCAL_FAKE_THRESHOLD` | `0.5` | Decision threshold on P(fake). Sits in the empty band between measured clusters |
 | `LIVE_CALL_LOCAL_WINDOW_SECONDS` | `4.0` | Analysis window. Lower for faster alerts, noisier windows |
 | `LIVE_CALL_LOCAL_MIN_RMS` | `0.005` | Voice-activity floor; quieter windows are skipped, never labelled |
 | `LIVE_CALL_LOCAL_DEVICE` | `cpu` | `cpu` or `cuda` |
@@ -317,18 +318,17 @@ trade: alerting on one window would false-alarm on most genuine calls (see
 `LIVE_CALL_LOCAL_WINDOW_SECONDS=3.0` for a ~6 s floor if you accept shorter,
 noisier windows.
 
-Measured end to end with the local detector at 1× real time:
+Measured end to end at 1× real time with the real samples:
 
 ```text
-AI call    first verdict 4.12 s   first alert 8.13 s   upgrade 16.2 s
-Human call first verdict 4.11 s   no alert raised
+ElevenLabs AI    first verdict 4.90 s   first alert 8.52 s   upgrade 16.4 s
+Human voice note first verdict 4.48 s   no alert raised
 ```
 
-Both runs dropped zero frames, so inference keeps up with real time on 4 CPU
-threads. **This is pipeline timing on VITS-generated audio, not an accuracy
-claim about your AI voice.**
-
----
+Both runs dropped zero frames, and analysis windows complete 3.6–4.2 s apart
+against a 4 s cadence, so inference tracks real time with margin on 4 CPU
+threads. **This is pipeline timing on one ElevenLabs preset, not an accuracy
+claim about every AI voice.**
 
 ## Security and privacy
 
@@ -378,16 +378,17 @@ rules require it. The popup carries this disclosure.
 2. **Extension code is unexecuted.** It is written to the documented
    `tabCapture` + `offscreen` contract but has not run in a browser here. The
    first real run is step 6 of `docs/LIVE_CALL_MANUAL_TEST.md`.
-3. **Detection is validated against one TTS family only.** All AI samples were
-   VITS (`facebook/mms-tts-eng`). Nothing here predicts behaviour on
-   ElevenLabs, PlayHT, Cartesia, OpenAI TTS or a clone of a specific person —
-   which is what a real attacker uses. Benchmark your own samples.
-4. **The false-alarm rate is non-trivial.** ~10% of individual windows on
-   clean human speech at the default threshold. The two-window run requirement
-   suppresses most of it, but a long call can still produce a false warning.
-5. **LibriSpeech is not a phone call.** The human corpus is clean, close-miked
-   audiobook speech. Real calls are noisy, compressed and accented, so the
-   measured rates may not transfer.
+3. **Model choice does not transfer between TTS engines.** The five models'
+   ranking *reversed* between VITS and ElevenLabs; the best on one was the
+   worst on the other, and inverted rather than merely weak. The shipped
+   default is tuned for ElevenLabs. **For any other engine, re-run
+   `scripts/benchmark_detectors.py` before trusting a verdict.**
+4. **The ElevenLabs result rests on one voice and one recording** (23 AI
+   windows, one preset) against 5–6 windows from one human speaker. Wide
+   separation, small sample.
+5. **Only the human side has been through WhatsApp's codec.** The AI sample is
+   a clean MP3. A live call compresses the AI side too, and that is the
+   largest remaining unknown.
 6. **The hosted provider path is unverified.** Reached, authenticated-rejected
    with a dummy key, never run with a real one.
 7. **WhatsApp's own noise suppression and codec** may degrade an acoustically

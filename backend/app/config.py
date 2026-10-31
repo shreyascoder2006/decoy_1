@@ -39,9 +39,13 @@ class Settings(BaseSettings):
     # --- Local open-source detector --------------------------------------
     # Runs in-process: no credential, no credits, no network at call time.
     live_call_local_model_id: str = Field(
-        # Benchmarked choice, not the most downloaded one: see
-        # scripts/benchmark_detectors.py and docs/DETECTOR_BENCHMARK.md.
-        default="Hemgg/Deepfake-audio-detection",
+        # Chosen by measurement against ElevenLabs output and a real
+        # WhatsApp-codec human sample: AUC 1.000, clean separation
+        # (human 0.06-0.12, AI 0.78-0.91). The previous default scored
+        # AUC 0.009 on the same data -- almost perfectly inverted -- while
+        # ranking BEST on VITS. Detector choice does not transfer between
+        # TTS engines; see docs/DETECTOR_BENCHMARK.md before changing this.
+        default="Gustking/wav2vec2-large-xlsr-deepfake-audio-classification",
         alias="LIVE_CALL_LOCAL_MODEL_ID",
     )
     live_call_local_device: str = Field(default="cpu", alias="LIVE_CALL_LOCAL_DEVICE")
@@ -49,8 +53,11 @@ class Settings(BaseSettings):
         default=4.0, alias="LIVE_CALL_LOCAL_WINDOW_SECONDS"
     )
     # Calibration-dependent. Tune on your own samples with scripts/detect_file.py.
+    # 0.5 sits in the empty band between the two measured clusters
+    # (human max 0.121, AI min 0.784), leaving margin on both sides for
+    # codec degradation to move scores without flipping a verdict.
     live_call_local_fake_threshold: float = Field(
-        default=0.9, alias="LIVE_CALL_LOCAL_FAKE_THRESHOLD"
+        default=0.5, alias="LIVE_CALL_LOCAL_FAKE_THRESHOLD"
     )
     # Voice-activity floor. Windows quieter than this are reported as skipped
     # rather than labelled, so silence cannot raise an alert.
