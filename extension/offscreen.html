@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Live Call Voice Check — audio pipeline</title>
+  </head>
+  <body>
+    <!--
+      Offscreen documents have no visible UI. This page exists because a
+      Manifest V3 service worker cannot hold a MediaStream or an AudioContext:
+      it can be terminated at any time. Chrome documents consuming a
+      tabCapture stream ID from an offscreen document, which is what happens
+      here.
+    -->
+    <p>Audio capture pipeline for the Live Call Voice Check extension.</p>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

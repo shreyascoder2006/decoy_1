@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Live Call Voice Check</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <h1 class="title">Live Call Voice Check</h1>
+        <p class="subtitle">Advisory synthetic-speech screening</p>
+      </header>
+
+      <div id="mock-banner" class="banner banner--mock" hidden>
+        <strong>Mock detector active.</strong> Verdicts are scripted for
+        plumbing tests and carry no evidential value.
+      </div>
+
+      <section class="status-card" id="status-card">
+        <span class="status-label">Status</span>
+        <span class="status-value" id="status-value">Idle</span>
+        <p class="status-detail" id="status-detail"></p>
+      </section>
+
+      <div id="alert-box" class="banner banner--alert" hidden>
+        <strong id="alert-title"></strong>
+        <p id="alert-message"></p>
+        <p class="alert-qualifier" id="alert-qualifier"></p>
+      </div>
+
+      <div id="error-box" class="banner banner--error" hidden>
+        <strong id="error-code"></strong>
+        <p id="error-message"></p>
+      </div>
+
+      <section class="controls">
+        <button id="start" class="button button--primary" type="button">
+          Start Protection
+        </button>
+        <button id="stop" class="button button--secondary" type="button" disabled>
+          Stop Protection
+        </button>
+      </section>
+
+      <section class="readout">
+        <dl class="metrics">
+          <div class="metric">
+            <dt>Elapsed</dt>
+            <dd id="m-elapsed">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Alert latency</dt>
+            <dd id="m-alert-latency">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Latest label</dt>
+            <dd id="m-label">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Score</dt>
+            <dd id="m-score">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Analysis window</dt>
+            <dd id="m-window">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Detector</dt>
+            <dd id="m-provider">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Capture rate</dt>
+            <dd id="m-rate">—</dd>
+          </div>
+          <div class="metric">
+            <dt>Confidence</dt>
+            <dd id="m-provisional">—</dd>
+          </div>
+        </dl>
+      </section>
+
+      <footer class="disclosure">
+        <p>
+          While protection is enabled, audio rendered by the WhatsApp Web tab is
+          captured and streamed to the configured detection provider for
+          analysis. Capture starts only when you press Start Protection and
+          stops when you press Stop Protection.
+        </p>
+        <p>
+          Inform the other caller and obtain consent where your local law or
+          institutional rules require it.
+        </p>
+        <p class="disclosure--limits">
+          This tool reports signals associated with synthetic speech in the
+          audio it analysed. It does not verify who the caller is, prove intent,
+          or catch every AI-generated voice.
+        </p>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

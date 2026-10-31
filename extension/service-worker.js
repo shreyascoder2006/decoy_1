@@ -1,0 +1,554 @@
+/*
+ * service-worker.js -- extension coordinator.
+ *
+ * Responsibilities:
+ *   - verify the active tab really is WhatsApp Web (by URL host, never by
+ *     reaching into the page's DOM or its private JavaScript)
+ *   - obtain a tabCapture stream ID off the user's click gesture
+ *   - create the offscreen document and hand the stream ID over
+ *   - create the backend session over loopback HTTP
+ *   - own the user-visible state: badge, desktop notification, popup state
+ *
+ * A Manifest V3 service worker can be terminated at any time, so all durable
+ * state lives in chrome.storage.session, and nothing here holds a
+ * MediaStream.
+ */
+'use strict';
+
+const BACKEND_ORIGIN = 'http://127.0.0.1:8000';
+const OFFSCREEN_PATH = 'offscreen.html';
+const WHATSAPP_HOSTS = ['web.whatsapp.com'];
+const ALERT_NOTIFICATION_ID = 'live-call-synthetic-voice';
+const STATE_KEY = 'liveCallState';
+
+const STATUS = {
+  IDLE: 'Idle',
+  STARTING: 'Starting',
+  LISTENING: 'Listening',
+  ANALYSING: 'Analysing',
+  ALERT: 'Potential AI voice',
+  INCONCLUSIVE: 'Inconclusive',
+  ERROR: 'Error'
+};
+
+const DEFAULT_STATE = {
+  status: STATUS.IDLE,
+  sessionId: null,
+  provider: null,
+  mockMode: false,
+  startedAt: null,
+  speechAt: null,
+  alertAt: null,
+  alertLatencySeconds: null,
+  firstVerdictLatencySeconds: null,
+  lastLabel: null,
+  lastScore: null,
+  lastConsistency: null,
+  lastWindow: null,
+  provisional: null,
+  alertCode: null,
+  alertTitle: null,
+  alertMessage: null,
+  detail: null,
+  errorCode: null,
+  errorMessage: null,
+  framesSent: 0,
+  inputSampleRate: null,
+  tabId: null
+};
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+async function readState() {
+  const stored = await chrome.storage.session.get(STATE_KEY);
+  return { ...DEFAULT_STATE, ...(stored[STATE_KEY] || {}) };
+}
+
+async function writeState(patch) {
+  const next = { ...(await readState()), ...patch };
+  await chrome.storage.session.set({ [STATE_KEY]: next });
+  // The popup may be closed; a failed broadcast is normal.
+  chrome.runtime.sendMessage({ target: 'popup', type: 'STATE', state: next }).catch(() => {});
+  return next;
+}
+
+async function resetState() {
+  await chrome.storage.session.set({ [STATE_KEY]: { ...DEFAULT_STATE } });
+  chrome.runtime
+    .sendMessage({ target: 'popup', type: 'STATE', state: { ...DEFAULT_STATE } })
+    .catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Badge and notifications
+// ---------------------------------------------------------------------------
+
+async function setBadge(text, colour) {
+  try {
+    await chrome.action.setBadgeText({ text });
+    if (colour) {
+      await chrome.action.setBadgeBackgroundColor({ color: colour });
+    }
+  } catch (error) {
+    /* the action may be unavailable mid-teardown */
+  }
+}
+
+async function showAlertNotification(alert) {
+  try {
+    await chrome.notifications.create(ALERT_NOTIFICATION_ID, {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/alert-128.png'),
+      title: alert.title || 'Potential AI-generated voice detected',
+      message:
+        alert.message ||
+        'The analysed audio contains synthetic-speech signals. Independently verify the caller.',
+      priority: 2,
+      requireInteraction: true
+    });
+  } catch (error) {
+    console.warn('[sw] notification failed', error && error.message);
+  }
+}
+
+async function clearAlertNotification() {
+  try {
+    await chrome.notifications.clear(ALERT_NOTIFICATION_ID);
+  } catch (error) {
+    /* nothing to clear */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Offscreen document
+// ---------------------------------------------------------------------------
+
+async function hasOffscreenDocument() {
+  if (chrome.runtime.getContexts) {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [chrome.runtime.getURL(OFFSCREEN_PATH)]
+    });
+    return contexts.length > 0;
+  }
+  return false;
+}
+
+let creatingOffscreen = null;
+
+async function ensureOffscreenDocument() {
+  if (await hasOffscreenDocument()) {
+    return;
+  }
+  if (creatingOffscreen) {
+    await creatingOffscreen;
+    return;
+  }
+  creatingOffscreen = chrome.offscreen.createDocument({
+    url: OFFSCREEN_PATH,
+    reasons: ['USER_MEDIA'],
+    justification:
+      'Hold the captured WhatsApp Web tab audio stream and convert it to PCM for local analysis.'
+  });
+  try {
+    await creatingOffscreen;
+  } finally {
+    creatingOffscreen = null;
+  }
+}
+
+async function closeOffscreenDocument() {
+  if (await hasOffscreenDocument()) {
+    try {
+      await chrome.offscreen.closeDocument();
+    } catch (error) {
+      /* already closed */
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tab verification
+// ---------------------------------------------------------------------------
+
+function isWhatsAppWebUrl(url) {
+  if (!url) {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && WHATSAPP_HOSTS.includes(parsed.hostname);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function findTargetTab() {
+  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (active && isWhatsAppWebUrl(active.url)) {
+    return { tab: active };
+  }
+  return {
+    error:
+      'Open https://web.whatsapp.com in the active tab, answer the call there, then press Start Protection.'
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Backend session
+// ---------------------------------------------------------------------------
+
+async function createBackendSession() {
+  const response = await fetch(`${BACKEND_ORIGIN}/api/live-calls`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      source: 'whatsapp_web_tab',
+      audio_format: 'pcm_s16le',
+      sample_rate: 16000,
+      channels: 1
+    })
+  });
+  if (!response.ok) {
+    throw new Error(`Backend refused the session (HTTP ${response.status}).`);
+  }
+  return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// Start / stop
+// ---------------------------------------------------------------------------
+
+async function startProtection() {
+  const current = await readState();
+  if (current.sessionId) {
+    return { ok: false, error: 'Protection is already running.' };
+  }
+
+  await clearAlertNotification();
+  await resetState();
+  await writeState({ status: STATUS.STARTING });
+  await setBadge('...', '#2B598A');
+
+  const { tab, error: tabError } = await findTargetTab();
+  if (tabError) {
+    await failStart('NO_WHATSAPP_TAB', tabError);
+    return { ok: false, error: tabError };
+  }
+
+  // The user's click on Start Protection in the popup is the gesture that
+  // authorises this. Nothing is captured before it.
+  let streamId;
+  try {
+    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+  } catch (error) {
+    const message = `Could not get tab audio permission: ${
+      error && error.message ? error.message : error
+    }`;
+    await failStart('CAPTURE_PERMISSION', message);
+    return { ok: false, error: message };
+  }
+
+  let session;
+  try {
+    session = await createBackendSession();
+  } catch (error) {
+    const message = `${
+      error && error.message ? error.message : error
+    } Start the backend with: uvicorn app.main:app --host 127.0.0.1 --port 8000`;
+    await failStart('BACKEND_UNREACHABLE', message);
+    return { ok: false, error: message };
+  }
+
+  await ensureOffscreenDocument();
+
+  const result = await chrome.runtime.sendMessage({
+    target: 'offscreen',
+    type: 'START_CAPTURE',
+    streamId,
+    sessionId: session.session_id,
+    websocketUrl: session.websocket_url
+  });
+
+  if (!result || !result.ok) {
+    const message = (result && result.error) || 'Capture could not be started.';
+    await failStart('CAPTURE_FAILED', message);
+    await closeOffscreenDocument();
+    return { ok: false, error: message };
+  }
+
+  await setBadge('ON', '#2B598A');
+  const next = await writeState({
+    status: STATUS.LISTENING,
+    sessionId: session.session_id,
+    provider: session.provider,
+    mockMode: Boolean(session.mock_mode),
+    startedAt: Date.now(),
+    inputSampleRate: result.inputSampleRate || null,
+    tabId: tab.id
+  });
+  return { ok: true, state: next };
+}
+
+async function failStart(code, message) {
+  await setBadge('ERR', '#B3261E');
+  await writeState({
+    status: STATUS.ERROR,
+    errorCode: code,
+    errorMessage: message,
+    sessionId: null
+  });
+}
+
+async function stopProtection() {
+  try {
+    await chrome.runtime.sendMessage({ target: 'offscreen', type: 'STOP_CAPTURE' });
+  } catch (error) {
+    /* the offscreen document may already be gone */
+  }
+
+  const state = await readState();
+  if (state.sessionId) {
+    // Best effort: release backend state even if the socket already died.
+    try {
+      await fetch(`${BACKEND_ORIGIN}/api/live-calls/${state.sessionId}/stop`, {
+        method: 'POST'
+      });
+    } catch (error) {
+      /* the backend may be down; the socket close already ended the stream */
+    }
+  }
+
+  await closeOffscreenDocument();
+  await clearAlertNotification();
+  await setBadge('', '#2B598A');
+  await resetState();
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Backend event handling
+// ---------------------------------------------------------------------------
+
+async function handleBackendEvent(event) {
+  if (!event || typeof event !== 'object') {
+    return;
+  }
+
+  if (event.type === 'status') {
+    await handleStatusEvent(event);
+    return;
+  }
+
+  if (event.type === 'detector_result') {
+    await writeState({
+      lastLabel: event.label === undefined ? null : event.label,
+      lastScore: event.aggregated_score === undefined ? null : event.aggregated_score,
+      lastConsistency: event.consistency === undefined ? null : event.consistency,
+      lastWindow:
+        event.window_start_s === undefined && event.window_end_s === undefined
+          ? null
+          : { start: event.window_start_s, end: event.window_end_s },
+      provisional: event.provisional === undefined ? null : event.provisional,
+      provider: event.provider || null
+    });
+    return;
+  }
+
+  if (event.type === 'alert') {
+    const state = await readState();
+    // Notify once on the first alert; only re-notify if the code changes
+    // (that is, the evidence was upgraded). Analysis windows arrive every few
+    // seconds and must not each raise a toast.
+    if (state.alertCode !== event.code) {
+      await showAlertNotification(event);
+    }
+    await setBadge('AI', '#C26B0A');
+    await writeState({
+      status: STATUS.ALERT,
+      alertAt: Date.now(),
+      alertCode: event.code,
+      alertTitle: event.title,
+      alertMessage: event.message,
+      provisional: Boolean(event.provisional),
+      alertLatencySeconds:
+        event.latency_seconds === undefined ? null : event.latency_seconds
+    });
+    return;
+  }
+
+  if (event.type === 'metrics') {
+    await writeState({
+      firstVerdictLatencySeconds:
+        event.first_verdict_latency_seconds === undefined
+          ? null
+          : event.first_verdict_latency_seconds,
+      alertLatencySeconds:
+        event.alert_latency_seconds === undefined ? null : event.alert_latency_seconds
+    });
+    return;
+  }
+
+  if (event.type === 'error') {
+    await setBadge('ERR', '#B3261E');
+    await writeState({
+      status: STATUS.ERROR,
+      errorCode: event.code || 'UNKNOWN',
+      errorMessage: event.message || 'Detection is unavailable.',
+      // An error must never leave a stale real/fake verdict on screen.
+      lastLabel: null,
+      lastScore: null
+    });
+  }
+}
+
+async function handleStatusEvent(event) {
+  const status = event.status;
+
+  if (status === 'connecting_to_detector') {
+    await writeState({ status: STATUS.STARTING, detail: 'Connecting to the detector.' });
+    return;
+  }
+  if (status === 'ready') {
+    await writeState({ status: STATUS.LISTENING, detail: 'Detector ready.' });
+    return;
+  }
+  if (status === 'analysing') {
+    const state = await readState();
+    if (state.status !== STATUS.ALERT) {
+      await writeState({ status: STATUS.ANALYSING, detail: 'Streaming audio for analysis.' });
+    }
+    return;
+  }
+  if (status === 'inconclusive') {
+    const state = await readState();
+    if (state.status !== STATUS.ALERT) {
+      await writeState({
+        status: STATUS.INCONCLUSIVE,
+        detail: event.detail || 'Insufficient speech — continuing analysis.'
+      });
+    }
+    return;
+  }
+  if (status === 'no_synthetic_signal') {
+    const state = await readState();
+    if (state.status !== STATUS.ALERT) {
+      await writeState({
+        status: STATUS.ANALYSING,
+        detail: event.detail || 'No synthetic signal detected in analysed audio so far.'
+      });
+    }
+    return;
+  }
+  if (status === 'lagging') {
+    await writeState({ detail: event.detail || 'Audio relay is lagging.' });
+    return;
+  }
+  if (status === 'stopped') {
+    await writeState({ detail: 'Detector stream closed.' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Message routing
+// ---------------------------------------------------------------------------
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message) {
+    return false;
+  }
+
+  // From the popup
+  if (message.type === 'START_PROTECTION') {
+    startProtection().then(sendResponse);
+    return true;
+  }
+  if (message.type === 'STOP_PROTECTION') {
+    stopProtection().then(sendResponse);
+    return true;
+  }
+  if (message.type === 'GET_STATE') {
+    readState().then((state) => sendResponse({ ok: true, state }));
+    return true;
+  }
+
+  // From the offscreen document
+  if (message.target !== 'service-worker') {
+    return false;
+  }
+
+  if (message.type === 'BACKEND_EVENT') {
+    handleBackendEvent(message.event).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message.type === 'SPEECH_DETECTED') {
+    writeState({ speechAt: Date.now() }).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (message.type === 'CAPTURE_READY') {
+    writeState({ inputSampleRate: message.inputSampleRate }).then(() =>
+      sendResponse({ ok: true })
+    );
+    return true;
+  }
+  if (message.type === 'CAPTURE_ERROR') {
+    failStart('CAPTURE_ERROR', message.message || 'Capture failed.').then(() =>
+      sendResponse({ ok: true })
+    );
+    return true;
+  }
+  if (message.type === 'TRANSPORT_LAG') {
+    writeState({ detail: 'Audio is being dropped: the relay is not keeping up.' }).then(
+      () => sendResponse({ ok: true })
+    );
+    return true;
+  }
+  if (message.type === 'CAPTURE_STOPPED') {
+    (async () => {
+      const state = await readState();
+      // A user-initiated stop has already reset state; this covers the
+      // involuntary cases (tab closed, backend died, track ended).
+      if (state.sessionId && message.reason !== 'user_stop') {
+        await setBadge('', '#2B598A');
+        await writeState({
+          status: STATUS.IDLE,
+          sessionId: null,
+          detail: `Capture ended (${message.reason}).`
+        });
+        await closeOffscreenDocument();
+      }
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+  if (message.type === 'BACKEND_CLOSED') {
+    return false;
+  }
+
+  return false;
+});
+
+// Clicking the warning opens nothing surprising; it just clears the toast.
+chrome.notifications.onClicked.addListener(() => {
+  void clearAlertNotification();
+});
+
+// If the captured tab goes away, stop cleanly.
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const state = await readState();
+  if (state.tabId === tabId && state.sessionId) {
+    await stopProtection();
+  }
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void resetState();
+  void setBadge('', '#2B598A');
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  void resetState();
+  void setBadge('', '#2B598A');
+});

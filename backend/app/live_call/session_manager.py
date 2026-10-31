@@ -425,7 +425,9 @@ class LiveCallSession:
 
         if outcome.alert is not None:
             self.metrics.mark_alert()
-            outcome.alert.latency_seconds = self.metrics.alert_latency_seconds
+            # Each alert carries its own latency; the metrics record keeps the
+            # time to the first alert for the session report.
+            outcome.alert.latency_seconds = self.metrics.seconds_since_origin()
             self.state = STATE_ALERTED
             logger.info(
                 "alert %s raised for %s at %.3fs after first speech/audio",

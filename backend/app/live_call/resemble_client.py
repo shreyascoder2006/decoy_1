@@ -311,10 +311,12 @@ class MockDetectorClient(DetectorClient):
         self._closed = False
 
     async def connect(self) -> None:
+        # The real client absorbs the provider's `ready` frame inside
+        # connect(), so the mock must not enqueue one: emitting it here would
+        # make the session manager announce "ready" twice.
         logger.warning(
             "MOCK detector selected: verdicts are scripted and carry no evidential value"
         )
-        await self._queue.put(ProviderMessage(type="ready"))
 
     def _next_label(self) -> str:
         index = min(self._windows_emitted, len(self._labels) - 1)

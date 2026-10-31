@@ -1,0 +1,9 @@
+{
+  "name": "live-call-deepfake-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome MV3 extension that captures WhatsApp Web tab audio and streams PCM to the local detection backend.",
+  "scripts": {
+    "test": "node --test tests/audio-dsp.test.js"
+  }
+}

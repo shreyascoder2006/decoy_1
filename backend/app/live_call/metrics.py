@@ -123,6 +123,15 @@ class SessionMetrics:
     def alert_latency_seconds(self) -> float | None:
         return self._since_origin(self.alert_at)
 
+    def seconds_since_origin(self) -> float | None:
+        """Seconds from the latency origin to now.
+
+        Used to stamp each alert with its own latency. ``alert_latency_seconds``
+        remains the time to the *first* alert, which is what the session report
+        and the acceptance criteria ask for.
+        """
+        return self._since_origin(_now())
+
     @property
     def elapsed_seconds(self) -> float | None:
         if self.started_at is None:

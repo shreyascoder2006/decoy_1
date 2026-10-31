@@ -160,12 +160,25 @@ def test_decode_json_array_is_inert():
 # --- mock detector -------------------------------------------------------
 
 
-async def test_mock_emits_ready_then_a_window_per_four_seconds():
+async def test_mock_absorbs_ready_in_connect_like_the_real_client():
+    """connect() must not leave a `ready` frame in the queue.
+
+    The real adapter consumes `ready` inside connect(); if the mock enqueued
+    one, the session manager would announce "ready" to the extension twice.
+    """
+    mock = MockDetectorClient(session_id="s", contract=CONTRACT)
+    await mock.connect()
+    # 10 frames is only 1 s, far short of a 4 s window, so nothing is queued.
+    for _ in range(10):
+        await mock.send_audio(FRAME)
+    assert mock._queue.empty()
+
+
+async def test_mock_emits_a_window_per_four_seconds():
     mock = MockDetectorClient(
         session_id="s", contract=CONTRACT, labels=("skipped", "fake", "fake")
     )
     await mock.connect()
-    assert (await mock.receive()).is_ready
 
     # 4 s of audio == 40 frames of 100 ms.
     for _ in range(40):
@@ -193,7 +206,6 @@ async def test_mock_is_clearly_flagged_as_a_mock():
 async def test_mock_emits_a_final_then_ends():
     mock = MockDetectorClient(session_id="s", contract=CONTRACT, labels=("fake",))
     await mock.connect()
-    await mock.receive()  # ready
     for _ in range(40):
         await mock.send_audio(FRAME)
     await mock.receive()  # chunk
