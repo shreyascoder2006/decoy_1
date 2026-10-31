@@ -125,6 +125,74 @@ async function clearAlertNotification() {
 }
 
 // ---------------------------------------------------------------------------
+// Email check (Gmail)
+// ---------------------------------------------------------------------------
+
+const EMAIL_HOST = 'mail.google.com';
+const EMAIL_NOTIFICATION_ID = 'decoy-email-alert';
+const EMAIL_TIMEOUT_MS = 8000;
+const notifiedEmailKeys = new Set();
+
+// The content script cannot call the loopback backend itself (the page's CORS
+// rules apply to it), so the worker relays the request. Only a Gmail tab may
+// ask: a message from anywhere else is ignored.
+async function analyzeEmail(message, sender) {
+  let senderHost = '';
+  try {
+    senderHost = new URL(sender && sender.url ? sender.url : '').hostname;
+  } catch (error) {
+    /* fall through to the rejection below */
+  }
+  if (senderHost !== EMAIL_HOST) {
+    return { ok: false, error: 'rejected: not a Gmail tab' };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EMAIL_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${BACKEND_ORIGIN}/api/email/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message.payload),
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      return { ok: false, error: `backend returned HTTP ${response.status}` };
+    }
+    const result = await response.json();
+    if (result.level === 'high' && message.key && !notifiedEmailKeys.has(message.key)) {
+      notifiedEmailKeys.add(message.key);
+      await showEmailNotification(result);
+    }
+    return { ok: true, result };
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error && error.name === 'AbortError'
+          ? 'the backend did not answer in time'
+          : 'the backend is not reachable on 127.0.0.1:8000'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function showEmailNotification(result) {
+  try {
+    await chrome.notifications.create(EMAIL_NOTIFICATION_ID, {
+      type: 'basic',
+      iconUrl: chrome.runtime.getURL('icons/alert-128.png'),
+      title: 'Possible phishing email',
+      message: `${result.summary} (${result.findings.length} signals, score ${result.score}/100)`,
+      priority: 2
+    });
+  } catch (error) {
+    console.warn('[sw] email notification failed', error && error.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Offscreen document
 // ---------------------------------------------------------------------------
 
@@ -545,6 +613,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       sendResponse({ ok: true, enabled: Boolean(message.enabled) });
     })();
+    return true;
+  }
+
+  // From the Gmail content script
+  if (message.type === 'EMAIL_ANALYZE') {
+    analyzeEmail(message, sender).then(sendResponse);
     return true;
   }
 

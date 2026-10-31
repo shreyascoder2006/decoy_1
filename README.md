@@ -37,6 +37,33 @@ guess, and mock mode must be enabled explicitly.
 
 ---
 
+## Gmail email check (phishing signals)
+
+Open an email in Gmail and a banner appears above the message body, with the
+specific signals found. High-risk mail also raises a desktop notification.
+
+- **What it checks:** sender name vs address (brand impersonation), link text
+  vs real destination, raw-IP / shortened / look-alike (punycode) / non-HTTPS
+  links, executable and double-extension attachments, and urgency,
+  credential-request and payment-fraud wording. Rules and weights are in
+  `backend/app/email_check/scorer.py`; the score is a capped sum, **not a
+  probability**.
+- **What it does not do:** it does not decide whether the text was written by
+  AI, and a low score never means an email is safe — the banner says "no
+  phishing signals found", nothing stronger.
+- **Privacy:** the content script runs only on `https://mail.google.com/*`
+  (new in the manifest). Message text goes to your local backend on
+  `127.0.0.1` through the service worker, is not stored, and is never logged
+  (the log carries level, score and rule codes only).
+- **If the backend is down** the banner says the check is unavailable; it never
+  shows a verdict it did not compute.
+- **Status:** the scorer and endpoint are tested (17 tests). The Gmail page
+  integration is **not yet run in a real Gmail tab** — Gmail's markup is
+  undocumented, and the selectors at the top of `extension/gmail-content.js`
+  are the first thing to check if no banner appears.
+
+---
+
 ## Architecture
 
 ```text

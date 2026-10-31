@@ -62,6 +62,13 @@ def main(argv: list[str]) -> int:
     else:
         problems.append("no background.service_worker declared")
 
+    for index, script in enumerate(manifest.get("content_scripts", [])):
+        for rel in script.get("js", []) + script.get("css", []):
+            check(rel, f"content_scripts[{index}]")
+        for match in script.get("matches", []):
+            if match in BANNED_HOSTS:
+                problems.append(f"over-broad content_scripts match {match!r}")
+
     action = manifest.get("action", {})
     if "default_popup" in action:
         check(action["default_popup"], "action.default_popup")

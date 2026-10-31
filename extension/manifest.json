@@ -18,6 +18,13 @@
     "service_worker": "service-worker.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://mail.google.com/*"],
+      "js": ["gmail-content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Live Call Voice Check",
