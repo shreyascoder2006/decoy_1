@@ -32,7 +32,14 @@ async def lifespan(app: FastAPI):
             "LIVE CALL MOCK MODE IS ENABLED - detector verdicts are scripted "
             "and must not be presented as real detection results"
         )
+    elif settings.use_local_provider:
+        logger.info(
+            "local detector selected (%s); no credential needed. The model is "
+            "loaded on the first analysis session.",
+            settings.live_call_local_model_id,
+        )
     elif not settings.resemble_api_key:
+        # Only meaningful for a hosted provider: the local detector needs no key.
         logger.warning(
             "no provider API key is configured; live-call sessions will report "
             "DETECTOR_UNAVAILABLE rather than a verdict"
