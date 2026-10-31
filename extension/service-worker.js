@@ -576,8 +576,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'WAITING_FOR_DETECTOR') {
     writeState({
       detail:
-        'Waiting for the detector to load. The first run downloads the model ' +
-        '(over 1 GB) and can take several minutes; audio is held until it is ready.'
+        'Waiting for the detector to load. If the model is not cached yet it ' +
+        'is downloading now - check the backend window. Audio is held until ready.'
     }).then(() => sendResponse({ ok: true }));
     return true;
   }
