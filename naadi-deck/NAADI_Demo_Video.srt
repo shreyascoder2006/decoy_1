@@ -1,0 +1,63 @@
+1
+00:00:00,550 --> 00:00:02,040
+Introducing NAADI.
+
+2
+00:00:05,150 --> 00:00:07,440
+Your loom has been telling you for weeks.
+
+3
+00:00:09,050 --> 00:00:13,110
+NAADI learns each machine's own normal, without a single fault label.
+
+4
+00:00:13,350 --> 00:00:19,920
+Every six hours, it punches a card. By card 24, it had caught the change, before anyone heard a thing.
+
+5
+00:00:20,000 --> 00:00:23,920
+Type the bearing number from the motor plate, and the physics does the rest.
+
+6
+00:00:25,300 --> 00:00:29,090
+The envelope hears it: peaks right on the outer-race frequency.
+
+7
+00:00:29,500 --> 00:00:32,740
+Outer-race defect: 88.6%.
+
+8
+00:00:32,650 --> 00:00:34,590
+Same bearing. Two bills.
+
+9
+00:00:35,350 --> 00:00:43,240
+6.5 days are left. A breakdown costs over ₹21,000. Thursday's power cut? Just ₹1,280.
+
+10
+00:00:44,000 --> 00:00:46,310
+The agents prepare. You decide.
+
+11
+00:00:47,000 --> 00:00:51,740
+They line up the part and the technician, and every number comes from a tested tool.
+
+12
+00:00:52,650 --> 00:00:55,070
+One tap, and the drafts go to your phone.
+
+13
+00:00:55,000 --> 00:00:58,410
+In simulation: 17.8 days of warning (median).
+
+14
+00:00:58,750 --> 00:01:01,090
+For every loom, chakki and pump set.
+
+15
+00:01:01,300 --> 00:01:03,850
+Offline. In English, Hindi and Marathi.
+
+16
+00:01:03,650 --> 00:01:07,080
+NAADI. Machine pulse intelligence for small factories.
